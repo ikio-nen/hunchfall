@@ -67,6 +67,29 @@ Note: `/v2/trades` query params are NOT verified — new code uses
 `/v2/activity?type=TRADE` instead. A non-proxy-wallet `user` returns an empty
 `data` array; treat as "no activity", not an error.
 
+### `/v2/trades` — RFC-003 predictor tape (Part B live-check, 2026-09-30)
+
+The RFC-003 predictor adopts `/v2/trades?condition=<condition_id>&limit=N`
+(per-trade price/size/side/timestamp are needed for VWAP + momentum), where
+**USD notional per trade is `size × price`** — the rows carry **no
+`usdc_size`**. If `usdc_size` ever appears on these rows it is ignored; the
+formula is pinned by a unit test. `/v2/activity?type=TRADE` stays the
+RFC-001 extension-scan tape and is untouched.
+
+**P0 live-check result: BLOCKED (network).** All three Polymarket hosts
+(`gamma-api`, `clob`, `data-api`) were unreachable from the build network
+(`curl` returned `000` / connection timeout; DNS resolves to a
+non-routable-by-policy address), while `api.github.com`, `httpbin.org`,
+Bluesky, and Reddit answered normally — i.e. a host/geo block, not a
+code problem. Consequences: the exact `/v2/trades` **row key set** and the
+`condition_id -> market` **resolution surface** could not be confirmed live
+and remain `live-check` at runtime. Mitigations are unchanged: defensive
+aliases (`price`, `size`, `side`, `ts ∈ {timestamp, matchTime, match_time}`),
+the `size × price` USD definition pinned by test, and a `resolve_market()`
+seam with the slug path independent of the condition-id path. The first
+runtime run against a reachable network should record the observed key set
+here.
+
 ## hunchfall backend routes — RFC-001 additions (2026-09-30)
 
 | Route | Method | Purpose |
@@ -79,6 +102,43 @@ Note: `/v2/trades` query params are NOT verified — new code uses
 
 `GET /status` also gained an additive `equity_curve` field derived from
 `cycle_end` audit events.
+
+## hunchfall backend routes — RFC-003 additions (market guesser, prediction-only)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/predict` | POST | `{market_slug \| condition_id}` → Gamma resolve → CLOB book → `/v2/trades` tape → social pulse (social-outcome markets only) → Jev ensemble → typed P(YES) prediction or an honest abstention. Never places a fill. |
+| `/predict/demo` | GET | Runs the pinned demo market through the full pipeline; falls back to a committed canned snapshot. Always 200; **never persists**. |
+| `/predict/accuracy` | GET | Derived-on-read calibration ledger: Brier (model vs market vs always-0.5), Brier skill, direction accuracy, abstention rate, mock/live split. |
+| `/predict/{prediction_id}/resolve` | POST | Records the realised `YES \| NO` outcome for one logged prediction (append-only; manual settlement). |
+
+All four are additive; the loop, the deterministic gate, and the paper engine
+are untouched, and the prediction path never imports `PaperEngine`,
+`app.execution`, or `app.loop` (enforced by the extended AST guard).
+
+## Social sources — RFC-003 analyzer (Part B live-check, 2026-09-30)
+
+| Source | Endpoint used | Auth? | Live-check result |
+|---|---|---|---|
+| Bluesky **Jetstream** (posts/engagements) | `wss://jetstream2.us-east.bsky.network/subscribe` | No (keyless) | **VERIFIED** — connects and streams; 3 events in a 4 s window |
+| Bluesky public appview (handle/DID resolution) | `https://public.api.bsky.app/xrpc/app.bsky.actor.searchActors?q=` | No (keyless) | **VERIFIED** — `200` JSON (`actors[]`) |
+| Reddit public JSON | `https://www.reddit.com/search.json?q=` (custom User-Agent) | No (keyless) | **NOT AVAILABLE** — `403` on every variant tried (custom UA, browser UA, `r/polymarket/hot.json`, and `oauth.reddit.com` without a token) |
+| RSS | `app/scraper/news.py` (Google News + outlet feeds) | No (keyless) | verified (RFC-001, unchanged; imported read-only) |
+| **X / Twitter** | — | — | **EXCLUDED BY DESIGN** (no free tier); X-centric markets get a labelled **proxy** |
+
+**Jetstream payload (observed live):** top-level keys `did`, `time_us`,
+`kind`, `commit`; `commit` carries `operation`, `collection` (e.g.
+`app.bsky.feed.like`), `rkey`, and `record`. The RFC's assumed
+`/xrpc/network.bsky.jetstream.subscribeEvents` suffix is **wrong for this
+instance** — a plain HTTP GET and a websocket upgrade both return `404`;
+the correct live path is `/subscribe`. The analyzer pins the working URL in
+`SOCIAL_JETSTREAM_URL`, treats the payload defensively
+(`kind`/`commit.collection`/`did`), and caps the window
+(`SOCIAL_JETSTREAM_WINDOW_SEC`, `SOCIAL_MAX_EVENTS`).
+
+**Reddit is a best-effort feature source:** because keyless JSON is `403`
+today, the analyzer marks Reddit in `social.missing` and never blocks the
+prediction (a source that is slow or refused is dropped, not awaited).
 
 ## CLOB websocket (optional upgrade)
 

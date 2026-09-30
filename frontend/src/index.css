@@ -549,3 +549,84 @@ body {
 .wallet-chip:hover {
   border-color: var(--accent);
 }
+
+/* ---- RFC-003 market guesser (predict) ---- */
+.pred-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px;
+  background: #0e1117;
+}
+
+.pred-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.pred-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 10px;
+}
+
+.pred-meta b {
+  color: var(--text);
+}
+
+.pred-bar {
+  position: relative;
+  height: 8px;
+  background: #1a1f27;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.pred-bar-model {
+  height: 100%;
+  background: var(--accent);
+}
+
+.pred-bar-market {
+  position: absolute;
+  top: -3px;
+  width: 2px;
+  height: 14px;
+  background: var(--text);
+}
+
+.pred-bar-legend {
+  font-size: 11px;
+  margin: 4px 0 10px;
+}
+
+.pred-abstain {
+  border: 1px solid var(--amber, #b8860b);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  margin-bottom: 10px;
+}
+
+.pred-reasons ul {
+  margin: 6px 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pred-foot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}

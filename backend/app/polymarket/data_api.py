@@ -13,10 +13,15 @@ Used for the trade tape (feed-freshness staleness), price history,
 holder counts, and open interest per market — all market-data inputs to
 the snapshot/gate. No trading endpoints here (paper only).
 
-Additive v2 methods (``get_activity_v2`` / ``get_positions_v2``) follow
-the verified Data API v2 contract: ``{"data", "pagination"}`` envelope,
-NO ``offset`` param, cursor pagination, 429 + ``Retry-After`` retries,
-and an empty ``data`` array as a valid zero-state. v1 retires 2026-10-24.
+Additive v2 methods (``get_activity_v2`` / ``get_positions_v2`` /
+``get_trades_v2``) follow the verified Data API v2 contract:
+``{"data", "pagination"}`` envelope, NO ``offset`` param, cursor
+pagination, 429 + ``Retry-After`` retries, and an empty ``data`` array as a
+valid zero-state. v1 retires 2026-10-24.
+
+``get_trades_v2`` (``/v2/trades?condition=``) is the RFC-003 predictor tape:
+per-trade price/size/side/timestamp with **USD notional = ``size × price``**
+(the rows carry no ``usdc_size``).
 
 Raises DataApiError naming the endpoint on HTTP failure.
 """
@@ -204,6 +209,33 @@ class DataApiClient:
         if cursor:
             params["cursor"] = cursor
         data, _ = self._get_v2("/v2/positions", params)
+        return data
+
+    def get_trades_v2(
+        self,
+        condition: str,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> list[dict]:
+        """Per-trade tape for one market (RFC-003 predictor).
+
+        GET /v2/trades?condition=<condition_id>. Rows carry per-trade
+        ``price``/``size``/``side``/``timestamp``; **USD notional is
+        ``size × price``** — these rows have no ``usdc_size`` (see
+        docs/API_INVENTORY.md). An empty list is a valid zero-state.
+
+        Args:
+            condition: Market condition id.
+            limit: Page size.
+            cursor: Opaque next_cursor from the previous page.
+
+        Returns:
+            List of trade item dicts.
+        """
+        params: dict = {"condition": condition, "limit": int(limit)}
+        if cursor:
+            params["cursor"] = cursor
+        data, _ = self._get_v2("/v2/trades", params)
         return data
 
     def get_trades(

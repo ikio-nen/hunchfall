@@ -209,6 +209,114 @@ export interface WalletActivity {
   label?: string;
 }
 
+// ------------------------------------------------- RFC-003 market guesser types
+
+/** The market block of a prediction response. */
+export interface PredictMarket {
+  question: string;
+  slug: string;
+  condition_id: string;
+  yes_token_id: string;
+  no_token_id: string;
+  end_date?: string;
+  hours_to_resolution?: number | null;
+  volume24hr_usd?: number | null;
+  closed?: boolean;
+}
+
+/** The seven requested prediction fields live under `prediction`. */
+export interface Prediction {
+  prediction_id: string;
+  p_yes: number;
+  direction: "YES" | "NO" | "ABSTAIN";
+  confidence: number;
+  edge_vs_market: number;
+  abstained: boolean;
+  reasons: string[];
+  snapshot_ts?: string;
+}
+
+/** The labelled model block (mock is always explicit). */
+export interface PredictModelInfo {
+  mode: string; // "mock" | "live"
+  mock: boolean;
+  version: string;
+  ensemble_n: number;
+  disagreement: number;
+  note?: string;
+}
+
+export interface PredictSnapshot {
+  sha256: string;
+  missing: string[];
+  features: Record<string, unknown>;
+}
+
+/** `POST /predict` and `GET /predict/demo` response. */
+export interface PredictResponse {
+  mode: string;
+  market: PredictMarket;
+  prediction: Prediction;
+  market_price: number;
+  abstain_threshold: number;
+  model: PredictModelInfo;
+  snapshot: PredictSnapshot;
+  audit_event_id: number | null;
+  label: string;
+  trade_placed: boolean;
+  demo?: boolean;
+  snapshot_source?: "live" | "canned";
+}
+
+export interface PredictBrier {
+  model: number;
+  market: number;
+  baseline_0_5: number;
+  skill_vs_market: number | null;
+  skill_vs_baseline: number | null;
+  n?: number;
+}
+
+export interface PredictBin {
+  lo: number;
+  hi: number;
+  n: number;
+  mean_p: number | null;
+  event_rate: number | null;
+}
+
+/** `GET /predict/accuracy` — derived on read. */
+export interface PredictAccuracy {
+  as_of: string;
+  include_mock: boolean;
+  n_logged: number;
+  n_resolved: number;
+  n_abstained: number;
+  n_guessed: number;
+  n_resolved_guessed: number;
+  abstention_rate: number | null;
+  mean_abs_edge: number | null;
+  brier: PredictBrier | null;
+  brier_guessed: PredictBrier | null;
+  direction_accuracy: number | null;
+  bins: PredictBin[];
+  mock_split: Record<string, { n_logged: number; n_resolved: number }>;
+  label: string;
+}
+
+/** `POST /predict/{prediction_id}/resolve` response. */
+export interface PredictResolution {
+  prediction_id: string;
+  outcome: "YES" | "NO";
+  resolved_at: string;
+  prediction: Pick<
+    Prediction,
+    "p_yes" | "direction" | "confidence" | "abstained"
+  >;
+  brier: PredictBrier;
+  label: string;
+}
+
 // ------------------------------------------------------------ request helpers
 
 async function handle<T>(res: Response): Promise<T> {

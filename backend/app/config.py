@@ -90,6 +90,36 @@ class Settings(BaseSettings):
     # and redacted, never stored raw, and never trusted for prices.
     SCAN_PAGE_STATE_MAX_BYTES: int = 4096
 
+    # ---- Market guesser (prediction only; RFC-003) -----------------------------
+    # Absolute |edge| below which the guesser ABSTAINS instead of guessing.
+    PREDICT_ABSTAIN_EDGE: float = 0.10
+    # Ensemble size: the same model is asked N times; the median P(YES) wins.
+    PREDICT_ENSEMBLE_N: int = 3
+    # `/v2/trades` page size for the predictor tape.
+    PREDICT_TAPE_LIMIT: int = 100
+    # Book depth levels per side used for depth/imbalance features.
+    PREDICT_BOOK_LEVELS: int = 5
+    # Demo market + whether the demo may hit live upstreams at all.
+    PREDICT_DEMO_SLUG: str = "will-bitcoin-hit-100k-in-2026"
+    PREDICT_DEMO_LIVE: bool = True
+
+    # ---- Social-media analyzer (social-outcome markets; RFC-003) ---------------
+    # The analyzer's numbers are a FEATURE, never the decision.
+    SOCIAL_ENABLED: bool = True
+    # One shared deadline across sources; a slow source is dropped, not awaited.
+    SOCIAL_DEADLINE_SEC: float = 4.0
+    # Keyless Bluesky Jetstream v2 websocket (live-verified 2026-09-30).
+    # NOTE: the RFC's ".../xrpc/network.bsky.jetstream.subscribeEvents" suffix
+    # 404s on this instance; the working live path is the plain /subscribe.
+    SOCIAL_JETSTREAM_URL: str = "wss://jetstream2.us-east.bsky.network/subscribe"
+    # Bounded connect -> count -> close window (no long-lived subscription).
+    SOCIAL_JETSTREAM_WINDOW_SEC: float = 3.0
+    SOCIAL_MAX_EVENTS: int = 2000
+    # Keyless Reddit JSON is best-effort: it returned 403 in the 2026-09-30
+    # live-check, so a refusal degrades to `social.missing` and never blocks.
+    SOCIAL_REDDIT_ENABLED: bool = True
+    SOCIAL_RSS_MAX_ITEMS: int = 10
+
     # ---- Story sources ---------------------------------------------------------
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""
