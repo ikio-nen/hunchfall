@@ -33,18 +33,30 @@ class FakeWalletApi:
             {
                 "type": "TRADE",
                 "side": "BUY",
-                "size": 120.0,
+                "size": 240.0,  # shares
+                "usdc_size": 120.0,  # USD notional (the value the API reports)
                 "price": 0.62,
                 "timestamp": 1759224000,
                 "title": "Will it rain tomorrow?",
-                "transactionHash": "0xtx",
+                "transaction_hash": "0xtx",
             }
         ]
 
     def get_positions_v2(self, **kwargs):
         if self.fail:
             raise DataApiError("data-api down")
-        return []
+        return [
+            {
+                "condition_id": "0xcondition",
+                "title": "Will it rain tomorrow?",
+                "outcome": "Yes",
+                "size": 0.0,  # legacy/guessed field — current_size must win
+                "current_size": 250.0,
+                "avg_price": 0.42,
+                "current_price": 0.55,
+                "realized_pnl": 12.5,
+            }
+        ]
 
     def close(self) -> None:
         pass
@@ -151,7 +163,10 @@ def test_wallet_activity_happy_path(tmp_path, monkeypatch):
     assert body["chain"]["nonce"] == 7
     assert body["activity"][0]["type"] == "TRADE"
     assert body["activity"][0]["side"] == "BUY"
+    assert body["activity"][0]["size_usd"] == 120.0  # not 240.0 shares
     assert body["activity"][0]["tx_hash"] == "0xtx"
+    assert body["positions"][0]["size"] == 250.0  # not the 0.0 legacy size
+    assert body["positions"][0]["pnl"] == 12.5
     audit = AuditLog(resolve_db_path(settings.DATABASE_PATH))
     assert len(audit.query("wallet_activity_request")) == 1
 

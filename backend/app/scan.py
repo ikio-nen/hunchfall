@@ -295,7 +295,10 @@ class ScanService:
             if not isinstance(item, dict):
                 continue
             count += 1
-            size = _float(_first(item, ("size", "usdcSize", "sizeUsd", "amount"))) or 0.0
+            # usdc_size is the USD notional; size is shares (v2 OpenAPI).
+            size = _float(
+                _first(item, ("usdc_size", "usdcSize", "sizeUsd", "size", "amount"))
+            ) or 0.0
             side = str(_first(item, ("side", "takerSide"), "") or "").upper()
             if side == "BUY":
                 buy += size

@@ -272,9 +272,14 @@ def _normalize_activity(items: Any) -> list[dict]:
                 ),
                 "side": str(side).upper() if side is not None else None,
                 "outcome": _first(item, ("outcome", "asset")),
-                "size_usd": _num(_first(item, ("size", "usdcSize", "sizeUsd", "amount"))),
+                "size_usd": _num(
+                    _first(item, ("usdc_size", "usdcSize", "sizeUsd", "size", "amount"))
+                ),
                 "price": _num(_first(item, ("price",))),
-                "tx_hash": _first(item, ("transactionHash", "txHash", "tx_hash", "hash")),
+                "tx_hash": _first(
+                    item,
+                    ("transaction_hash", "transactionHash", "txHash", "tx_hash", "hash"),
+                ),
             }
         )
     return out
@@ -291,10 +296,23 @@ def _normalize_positions(items: Any) -> list[dict]:
                 "source": "polymarket-data-api-v2",
                 "market": _first(item, ("title", "question", "market", "slug", "condition_id", "conditionId", "condition")),
                 "outcome": _first(item, ("outcome", "asset")),
-                "size": _num(_first(item, ("size", "shares"))),
+                "size": _num(_first(item, ("current_size", "size", "shares"))),
                 "avg_price": _num(_first(item, ("avgPrice", "averagePrice", "avg_price"))),
                 "current_price": _num(_first(item, ("curPrice", "currentPrice", "current_price", "price"))),
-                "pnl": _num(_first(item, ("cashPnl", "cash_pnl", "pnl", "realizedPnl"))),
+                "pnl": _num(
+                    _first(
+                        item,
+                        (
+                            "realized_pnl",
+                            "total_pnl",
+                            "unrealized_pnl",
+                            "cashPnl",
+                            "cash_pnl",
+                            "pnl",
+                            "realizedPnl",
+                        ),
+                    )
+                ),
             }
         )
     return out
