@@ -48,29 +48,40 @@ def market_payload(**overrides) -> dict:
 
 
 def trade_items() -> list[dict]:
-    """Five-ish recent TRADE activity items (Data API v2 shape)."""
+    """Recent TRADE activity items in the *real* Data API v2 (snake_case) shape.
+
+    ``usdc_size`` is the USD notional, ``size`` is shares. They differ on
+    purpose: a normalizer that prefers ``size`` reports shares as USD, so the
+    volume assertions in ``test_api_scan.py`` fail if that regresses.
+    """
     now = datetime.now(timezone.utc).timestamp()
     return [
         {
             "side": "BUY",
-            "size": 600.0,
+            "size": 1200.0,
+            "usdc_size": 600.0,
             "price": 0.5,
             "timestamp": now - 30,
             "title": "Will it rain tomorrow?",
+            "transaction_hash": "0x" + "1a" * 32,
         },
         {
             "side": "BUY",
-            "size": 300.0,
+            "size": 600.0,
+            "usdc_size": 300.0,
             "price": 0.51,
             "timestamp": now - 20,
             "title": "Will it rain tomorrow?",
+            "transaction_hash": "0x" + "2b" * 32,
         },
         {
             "side": "SELL",
-            "size": 400.0,
+            "size": 800.0,
+            "usdc_size": 400.0,
             "price": 0.49,
             "timestamp": now - 10,
             "title": "Will it rain tomorrow?",
+            "transaction_hash": "0x" + "3c" * 32,
         },
     ]
 

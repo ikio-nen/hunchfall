@@ -7,6 +7,7 @@ from app.memory.audit import AuditLog
 from app.paths import resolve_db_path
 from tests.fakes import (
     FakeClob,
+    FakeDataApi,
     FakeGamma,
     make_settings,
     patch_scan,
@@ -14,9 +15,9 @@ from tests.fakes import (
 )
 
 
-def _client(tmp_path, monkeypatch, *, gamma=None, clob=None):
+def _client(tmp_path, monkeypatch, *, gamma=None, clob=None, data_api=None):
     settings = make_settings(tmp_path)
-    patch_scan(monkeypatch, gamma=gamma, clob=clob)
+    patch_scan(monkeypatch, gamma=gamma, clob=clob, data_api=data_api)
     return TestClient(create_app(settings)), settings
 
 
@@ -35,6 +36,7 @@ def test_scan_happy_path_revalidates_and_records(tmp_path, monkeypatch):
     assert body["hunch"]["approved"] is True
     assert body["hunch"]["label"] == "paper prediction · no trade placed"
     assert body["tape"]["count"] == 3
+    # the fakes carry size (shares) AND usdc_size (USD); the tape sums USD only
     assert body["tape"]["buy_volume"] == 900.0
     assert body["tape"]["sell_volume"] == 400.0
 
@@ -46,6 +48,39 @@ def test_scan_happy_path_revalidates_and_records(tmp_path, monkeypatch):
     assert signals[0]["payload"]["source"] == "extension"
     assert audit.query("fill") == []
     assert audit.query("scan")
+
+
+def test_scan_tape_uses_usdc_notional_not_shares(tmp_path, monkeypatch):
+    """v2 tape volumes must come from usdc_size (USD), never size (shares)."""
+    items = [
+        {
+            "side": "BUY",
+            "size": 2000.0,  # shares — must not be summed as USD
+            "usdc_size": 250.0,  # USD notional
+            "price": 0.50,
+            "timestamp": 1759224000,
+            "title": "Will it rain tomorrow?",
+            "transaction_hash": "0x" + "ab" * 32,
+        },
+        {
+            "side": "SELL",
+            "size": 400.0,
+            "usdc_size": 100.0,
+            "price": 0.51,
+            "timestamp": 1759224600,
+            "title": "Will it rain tomorrow?",
+            "transaction_hash": "0x" + "cd" * 32,
+        },
+    ]
+    client, _settings = _client(
+        tmp_path, monkeypatch, data_api=lambda s: FakeDataApi(s, items=items)
+    )
+    resp = client.post("/extension/scan", json=scan_body())
+    assert resp.status_code == 200, resp.text
+    tape = resp.json()["tape"]
+    assert tape["buy_volume"] == 250.0
+    assert tape["sell_volume"] == 100.0
+    assert tape["flow_imbalance"] == 0.4286
 
 
 def test_scan_unknown_slug_is_404_and_persists_nothing(tmp_path, monkeypatch):
