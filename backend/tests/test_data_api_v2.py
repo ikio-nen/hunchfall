@@ -88,3 +88,23 @@ def test_positions_params_user_status_limit(tmp_path):
     assert path == "/v2/positions"
     assert params == {"user": "0xabc", "status": "OPEN", "limit": 10}
     assert out == [{"size": 1}]
+
+
+def test_trades_v2_uses_condition_and_sends_no_offset(tmp_path):
+    """RFC-003 predictor tape: GET /v2/trades?condition=..., never offset."""
+    client = _client(tmp_path)
+    client._http = FakeHttp(
+        [FakeResponse(200, {"data": [{"price": 0.5, "size": 10}], "pagination": {}})]
+    )
+    out = client.get_trades_v2(condition="0xcond", limit=25)
+    path, params = client._http.calls[0]
+    assert path == "/v2/trades"
+    assert params == {"condition": "0xcond", "limit": 25}
+    assert "offset" not in params
+    assert out == [{"price": 0.5, "size": 10}]
+
+
+def test_trades_v2_empty_data_is_zero_state(tmp_path):
+    client = _client(tmp_path)
+    client._http = FakeHttp([FakeResponse(200, {"data": [], "pagination": {}})])
+    assert client.get_trades_v2(condition="0xcond", limit=5) == []

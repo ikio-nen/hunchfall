@@ -1,4 +1,13 @@
-# RFC.md — Extension Scan, Signal Validation, Watch-Only Wallets, Marketplaces & Proof Dashboard
+# RFC.md — hunchfall RFCs
+
+> This file collects accepted RFCs. **RFC-001** (extension scan, signal
+> validation, watch-only wallets, marketplaces, proof dashboard) is below and
+> unchanged. **RFC-003** (market guesser MVP — prediction only) follows it at
+> the end of this file.
+
+---
+
+# RFC-001 — Extension Scan, Signal Validation, Watch-Only Wallets, Marketplaces & Proof Dashboard
 
 | | |
 |---|---|
@@ -419,3 +428,445 @@ No code diff exists yet, so this is an assessment of the plan and repo state, no
 5. Full verify: `python -m pytest -q`, `npm run build`, offline loop sanity.
 
 **Estimated review surface:** ~6 new backend files, 4 changed backend files (3 additive + 1 settings), 3 new frontend pages + 1 component, 7 changed frontend files (mostly wiring), tests, docs.
+
+---
+---
+
+# RFC-003 — Market Guesser MVP (prediction-only)
+
+| | |
+|---|---|
+| **RFC** | RFC-003 |
+| **Status** | APPROVED — Part B in progress |
+| **Depends on** | RFC-001 (merged: scan, wallets, proof surfaces) |
+| **Repo / branch** | `D:\hunchfall` @ `main` |
+| **Part A deliverable** | This section. **No implementation code in Part A.** |
+| **Part B (after approval)** | Additive implementation + tests + docs; PR against `main`; **stop without merging.** |
+
+> **APPROVED (2026-09-30):** Part B is in progress on `feat/rfc-003-market-guesser`. Everything below is the approved specification of what is being built; the plan text is kept as the record of what was agreed.
+
+---
+
+## 1. Summary
+
+Given a Polymarket market, hunchfall guesses where it goes: **P(YES), direction, confidence** — as a paper prediction only. The simplest useful thing: no gate, no sizing, no fills; the loop, the deterministic gate, and the paper engine are untouched.
+
+Four additive routes on the existing FastAPI app:
+
+| Route | Purpose |
+|---|---|
+| `POST /predict` | `{market_slug \| condition_id}` → build a compact snapshot from official APIs, ask Jev for P(YES), return a typed prediction (or an honest abstention). |
+| `GET /predict/demo` | Runs the whole pipeline on one pinned market; falls back to a committed canned snapshot. Frontend works with zero setup. **Never persists.** |
+| `GET /predict/accuracy` | Derived-on-read calibration ledger: Brier vs market vs always-0.5, Brier skill scores, direction accuracy, abstention rate, mock/live split. |
+| `POST /predict/{prediction_id}/resolve` | Records the realized `YES \| NO` outcome for one logged prediction (manual settlement; Gamma auto-settle is P1). |
+
+Two new backend modules (`app/predict.py` for the guess, `app/social.py` for the social-media analyzer) plus one additive Data API method, one frontend tab, and no new dependencies. Mock mode works end-to-end without `JEV_API_KEY`; keys land later without a code change.
+
+Polymarket lists **social-outcome markets** (post counts, engagement, account behavior). For those, the social-media analyzer **is the data source** — keyless Bluesky Jetstream + Reddit + RSS — not generic sentiment. X has no free tier, so X-targeted chatter is computed from cross-platform signals and labelled a **proxy**. The analyzer's output is a feature in the snapshot, never the decision.
+
+---
+
+## 2. Invariants (extend RFC-001 §2; mechanically tested)
+
+1. **Prediction only.** `app/predict.py` and `app/social.py` never import `PaperEngine`, `app.execution`, or `app.loop`; the prediction path has no fill path and writes no `fill` events. The RFC-001 AST guard (`test_scan_prediction_only.py`) is extended to parse both modules — identifiers, imports, and runtime attributes.
+2. **No scans, no loop runs.** Part B verification never runs `python -m app.loop`; CI stays exactly `pytest -q` (backend) + `npm run build` (frontend).
+3. **Official APIs + keyless public social sources only.** Gamma (`/markets/slug/…`, market meta + `volume24hr`), CLOB market-data only (`/book`, `/midpoint`, …), Data API v2 (`/v2/trades`); the social-media analyzer reads keyless Bluesky **Jetstream** (websocket — `websockets` is already a dependency), Reddit public JSON, and RSS (existing `app/scraper/news.py` functions, imported read-only). **X is excluded** — no free tier — and X-targeted chatter is labelled a proxy. No other data source.
+4. **Mock is labeled.** The mock path returns `model.mock=true`, `model.version="jev-mock"`, `model.note="MOCK — not a real model"`; `/predict/accuracy` excludes mock predictions by default; no win-rate claim is ever derived from mock runs.
+5. **The badge.** Every prediction surface carries **“paper prediction · no trade placed”**; `/predict*` responses carry `label` + `trade_placed:false`.
+6. **No wallet, no keys, no secrets.** `/predict` never touches wallets or RPC, never accepts/stores/echoes secrets, and never logs request bodies.
+7. **Tests.** 1 happy-path + 2 negative tests per route, zero network (offline fakes injected by monkeypatch, mirrors the RFC-001 harness), plus unit tests for feature math and the ledger.
+8. **Social output is a feature, not a signal.** Analyzer numbers enter the snapshot and the UI only: they can never set direction or abstention, never appear in `reasons` as outcome claims, and X-targeted runs always carry `proxy: true` plus the reason.
+
+---
+
+## 3. Tape contract correction (supersedes RFC-001 §3, D9 — for the predictor only)
+
+**Verified live 2026-09-30 by the reviewer:** `GET /v2/trades?condition=<condition_id>` works and trades rows carry **no `usdc_size`**. USD notional per trade is **`size × price`**.
+
+Consequences:
+
+- The predictor tape uses the new `DataApiClient.get_trades_v2(condition=…, limit=…)` → `_get_v2("/v2/trades", …)` (same envelope unwrap, no `offset`, Retry-After ≤2 retries/≤5 s).
+- **USD = `size × price` is the single definition** — if `usdc_size` ever appears on these rows it is ignored; a test pins this.
+- RFC-001's extension-scan tape keeps using `/v2/activity?type=TRADE` (untouched); only the predictor adopts `/v2/trades`, where per-trade price/size/side/timestamp are needed for VWAP/momentum.
+- Item keys are still treated defensively (`price`, `size`, `side`, `ts ∈ {timestamp, matchTime, match_time}`), and **Part B starts with a live-check** recording the exact key set in `docs/API_INVENTORY.md`; the fixture keys are pinned by tests. The inventory's “`/v2/trades` query params are NOT verified” note is corrected in Part B.
+
+---
+
+## 4. Pipeline (Part B shape)
+
+```
+POST /predict {market_slug | condition_id}
+  → resolve_market()            Gamma only; slug path verified, condition_id path P0 live-check
+  → CLOB book + midpoint        best bid/ask, spread, top-N depth, last_trade_price   (required)
+  → Data API v2 /v2/trades      tape rows; USD = size × price                          (feature)
+  → social pulse                Jetstream window + Reddit + RSS; shared 4 s deadline   (feature)
+  → feature build               deterministic; canonical JSON → sha256                  (pure)
+  → model                       Jev decide() × N → median p_yes, disagreement  |  MOCK
+  → decision policy             edge, direction, abstention, confidence, reasons       (pure)
+  → audit: predict event        append-only ledger                                      
+  → 200 prediction
+```
+
+Rules:
+
+- Gamma + CLOB are **required**: failure → 502 `upstream_error` naming the source, nothing persisted (fail closed).
+- Tape and the social pulse are **features**: unavailable → omitted, listed in `snapshot.missing`, and named in `reasons`; the prediction is still returned. The social pulse runs **only for markets whose subject is social activity** (§5.1) — never as generic sentiment for every market.
+- One snapshot per request; `snapshot_ts` is the server time of the snapshot. No caching in MVP.
+- Nothing here reads `state.json`, the gate, exposure, or bankroll — a prediction is information, not a trade intent.
+
+---
+
+## 5. Compact snapshot & features (deterministic)
+
+Computed from the upstream payloads; nulls are omitted rather than guessed. All math is pinned by hand-computed unit tests.
+
+| Feature | Definition | Null policy |
+|---|---|---|
+| `market_mid` | CLOB midpoint of the YES token (outcomes/`clobTokenIds` position-aligned; index 0 = YES) | required |
+| `best_bid`, `best_ask` | top of the YES book | required |
+| `spread_cents` | `(ask − bid) × 100` | required |
+| `bid_depth_usd`, `ask_depth_usd` | Σ `price × size` over top `PREDICT_BOOK_LEVELS` (default 5) | 0 when side empty |
+| `imbalance` | `(bid_depth − ask_depth) / (bid_depth + ask_depth)` ∈ [−1, 1] | 0 when both 0 |
+| `last_trade_price` | from the book payload when present | omitted |
+| `tape.count` | rows returned | 0 allowed |
+| `buy_usd`, `sell_usd` | Σ `size × price` per side | 0 |
+| `flow_imbalance` | `(buy − sell) / (buy + sell)` | 0 when total 0 |
+| `vwap` | Σ`size·price` / Σ`size` | omitted when no rows |
+| `momentum_15m`, `momentum_60m` | VWAP(last window) − VWAP(prior window), in probability points | omitted when either window empty |
+| `volume_accel` | `usd(last 15m) / (usd(15m–2h15m) / 8)` (equal-length windows) | omitted when baseline 0 |
+| `volume24hr_usd` | Gamma `volume24hr` (aliases `volume24Hr`, `volume_24hr`) | omitted |
+| `hours_to_resolution` | local date math on Gamma `endDate` | omitted |
+| `social.relevance`, `social.proxy` | `direct` (target observable on Bluesky) \| `proxy` (X-targeted: cross-platform chatter only, `proxy: true` + reason) \| `none` (pulse skipped) | `none` when the market is not social-outcome related |
+| `social.posts_window`, `social.engagement_window`, `social.velocity`, `social.chatter_score`, `social.top_item` | Jetstream window counts (posts; like/repost events whose subject is in the collected set), recent-vs-prior velocity, 0..1 composite, best item `{platform, text ≤200, url, ts}` | omitted when no platform returned data |
+| `social.platforms_ok`, `social.missing[]` | which sources answered inside the shared deadline | always shown |
+| `base_rate_anchor` | **= `market_mid`**, surfaced to the model as “market-implied base rate” | required |
+
+Snapshot text handed to Jev (compact, ≤2 KB, control chars stripped):
+
+```
+Market: <question>
+Market-implied base rate (YES mid): 0.550
+Book: bid 0.54 / ask 0.56 · spread 2.0¢ · depth $5.2k bid / $3.9k ask · imbalance +0.15
+Tape (100 trades): buy $18,400 / sell $11,700 · flow +0.22 · vwap 0.551
+Momentum: 15m +0.004 · 60m +0.015 · volume_accel 1.8x
+Resolution in 2201.4h · 24h volume $48,210
+Social (bluesky 3s window · direct): 41 posts · 12 engagements · velocity 1.4x
+Chatter (reddit + rss · proxy for X): 9 mentions · top: "<title>" (6.2h)
+```
+
+### 5.1 Social-media analyzer (social-outcome markets)
+
+Polymarket lists markets whose resolution depends on social-media activity. For those markets this analyzer **is the data source** — it answers “is the subject posting / being talked about right now”, not “is the mood good”.
+
+- **Sources (all keyless):** Bluesky **Jetstream** v2 websocket (same JSON payload as v1; live tail filterable by collections/DIDs — v2 live path `/xrpc/network.bsky.jetstream.subscribeEvents`, v1-style `wss://…/subscribe` URLs still served; the exact public instance URL is pinned at the Part B live-check), Reddit public JSON (`/search.json` with a custom User-Agent — the OAuth path in `scraper/reddit.py` stays optional and untouched), and RSS (`scraper/news.py`, read-only). **X is excluded**; X-targeted markets get a labelled proxy instead.
+- **Relevance modes:** `direct` when the target itself is observable on Bluesky (count its posts/engagement in the window; DID filter when resolvable); `proxy` when the market is X-centric (cross-platform chatter only, `proxy: true` + reason in the state); `none` → the pulse is skipped entirely and the feature is absent. The classifier is a pinned keyword/entity heuristic; expanding it is a data change, not a code change.
+- **Output:** one `social` feature block (§5 table) consumed by the model as context and shown in the UI. It never sets direction/abstention, never produces outcome claims in `reasons`, and its numbers are never presented as the platform's own metric when `proxy: true`.
+- **Budget:** one shared deadline (`SOCIAL_DEADLINE_SEC`, default 4 s) across sources; a slow source is dropped, not awaited. The Jetstream window is bounded (`SOCIAL_JETSTREAM_WINDOW_SEC`, default 3 s, `SOCIAL_MAX_EVENTS` cap, connect → count → close; no long-lived subscription in MVP). Counts are window facts, not reproducible across calls; the math and response shapes are pinned by tests.
+
+**6.1 Model runs (ensemble).** `n = clamp(PREDICT_ENSEMBLE_N, 1, 5)` (default 3) calls to the same model; `p_yes = median(p_i)`; `disagreement = max(p_i) − min(p_i)` (0 in mock — the mock is deterministic, so all runs are identical; documented, not hidden). Per-run raw values are not returned; the audit stores model version + ensemble stats only.
+
+**6.2 Model framing (MVP).** Reuse `JevClient.decide()` unchanged — zero edits to `jev/client.py`. `DecisionState.market_question` = the market question; `news_summary` = the top social item or RSS headline (or “no fresh social data”); `extra_context` = the feature block above, including the social pulse with its relevance/proxy labels; `yes_price` = `market_mid`. The returned `p_true` (noul) is used directly as **P(YES)**. A dedicated P(YES) question set is P1 and would require loop regression tests first.
+
+**6.3 Decision fields.**
+
+- `edge_vs_market = round(p_yes − market_price, 4)` (signed).
+- `direction = "YES"` when `edge ≥ threshold`; `"NO"` when `edge ≤ −threshold`; else `"ABSTAIN"`, with `threshold = PREDICT_ABSTAIN_EDGE` (default **0.10**).
+- `abstained = direction == "ABSTAIN"` — no guess is surfaced when the model adds less than 10% over the market.
+- `confidence = round(min(1.0, abs(2·p_yes − 1) × (1 − min(1, disagreement))), 4)` — distance from a coin flip, discounted by ensemble spread. It is **not a probability** and the docs say so.
+- `reasons[]` — typed strings only (values from snapshot/decision), ≥1 always; abstention adds its threshold reason, e.g. `"abstained: |edge 0.041| < threshold 0.100"`. Never model prose.
+- Rounding: 4 dp for probabilities/edges/confidence, 2 dp for USD.
+
+**6.4 Demo determinism.** The canned demo snapshot is chosen so that the deterministic mock yields a **non-abstained** guess (pinned by a test), so the dashboard always demonstrates a real result card; `snapshot_source: "live" | "canned"` states which one served. Demo never writes to the ledger.
+
+---
+
+## 7. Endpoint contracts
+
+Error envelope everywhere: `{"detail": {"code": "…", "message": "…", "source"?: "gamma|clob|data-api|jev"}}` (RFC-001 §6). All responses carry `mode:"PAPER"`, `label:"paper prediction · no trade placed"`, `trade_placed:false`.
+
+### 7.1 `POST /predict`
+
+Request (`PredictRequest`, `extra="forbid"`): **exactly one** of
+
+| Field | Type / rules |
+|---|---|
+| `market_slug` | str, 1–160, pattern `^[A-Za-z0-9._~-]+$` |
+| `condition_id` | str, `^0x[0-9a-fA-F]{64}$` |
+
+Missing/extra/unknown fields → 422 (pydantic). Neither identifier → 422; both → 422.
+
+```json
+// 200 — the seven requested fields are exactly prediction.*
+{
+  "mode": "PAPER",
+  "market": {
+    "question": "Will BTC hit $100k in 2026?",
+    "slug": "will-btc-hit-100k-in-2026",
+    "condition_id": "0x…",
+    "yes_token_id": "…",
+    "no_token_id": "…",
+    "end_date": "2026-12-31T23:59:59Z",
+    "hours_to_resolution": 2201.4,
+    "volume24hr_usd": 48210.5,
+    "closed": false
+  },
+  "prediction": {
+    "prediction_id": "0e2b8f6c-…",
+    "p_yes": 0.67,
+    "direction": "YES",
+    "confidence": 0.34,
+    "edge_vs_market": 0.12,
+    "abstained": false,
+    "reasons": [
+      "book_imbalance +0.15 (bids dominate top 5 levels)",
+      "flow_imbalance +0.22 over 100 trades ($18,400 buy / $11,700 sell)",
+      "momentum_60m +0.015",
+      "volume_accel 1.8x (last 15m vs prior 2h rate)",
+      "social pulse: 41 posts / 12 engagements on bluesky (direct, 3s window)",
+      "base_rate anchor: market-implied 0.55",
+      "edge +0.120 ≥ threshold 0.100 → YES"
+    ],
+    "snapshot_ts": "2026-09-30T16:40:00Z"
+  },
+  "market_price": 0.55,
+  "abstain_threshold": 0.10,
+  "model": {
+    "mode": "mock", "mock": true, "version": "jev-mock",
+    "ensemble_n": 3, "disagreement": 0.0,
+    "note": "MOCK — not a real model"
+  },
+  "snapshot": {
+    "sha256": "…", "missing": [],
+    "features": {
+      "market_mid": 0.55, "best_bid": 0.54, "best_ask": 0.56, "spread_cents": 2.0,
+      "bid_depth_usd": 5210.5, "ask_depth_usd": 3871.2, "imbalance": 0.147,
+      "tape": {"count": 100, "buy_usd": 18400.0, "sell_usd": 11700.0,
+               "flow_imbalance": 0.2227, "vwap": 0.5512,
+               "momentum_15m": 0.004, "momentum_60m": 0.015, "volume_accel": 1.8},
+      "volume24hr_usd": 48210.5, "hours_to_resolution": 2201.4,
+      "social": {"relevance": "direct", "proxy": false,
+                 "platforms_ok": ["bluesky", "reddit", "rss"], "missing": [],
+                 "posts_window": 41, "engagement_window": 12, "velocity": 1.4,
+                 "chatter_score": 0.58,
+                 "top_item": {"platform": "bluesky", "text": "…", "ts": "…"}}
+    }
+  },
+  "audit_event_id": 187,
+  "label": "paper prediction · no trade placed",
+  "trade_placed": false
+}
+```
+
+Abstained responses have the same shape with `direction:"ABSTAIN"`, `abstained:true`, and the threshold reason in `reasons`.
+
+| Status | Code | When |
+|---|---|---|
+| 200 | — | Prediction logged (`trade_placed:false`) |
+| 404 | `market_not_found` | Gamma has no market for the slug/condition |
+| 409 | `market_not_tradeable` | `closed:true`, or no two-sided token pair |
+| 422 | pydantic | Neither/both identifiers, malformed values, unknown fields |
+| 502 | `upstream_error` | Gamma/CLOB/Data API/Jev failure (source named); **no predict event persisted** |
+
+**Persisted:** one `predict` event per successful guess (§8). Upstream failures persist only `stage_error`, like RFC-001.
+
+### 7.2 `GET /predict/demo`
+
+No params. **Always 200**, never persists. Runs the pinned market (`PREDICT_DEMO_SLUG`) through the full pipeline; on any upstream failure (or when `PREDICT_DEMO_LIVE=false`) serves the committed canned snapshot.
+
+```json
+{
+  "mode": "PAPER",
+  "demo": true,
+  "snapshot_source": "canned",
+  "market": { "…": "same block as /predict" },
+  "prediction": { "…": "same block; canned snapshot is pinned to a non-abstained mock guess", "snapshot_ts": "2026-09-30T16:40:00Z" },
+  "market_price": 0.55,
+  "abstain_threshold": 0.10,
+  "model": {"mode": "mock", "mock": true, "version": "jev-mock", "ensemble_n": 1, "disagreement": 0.0, "note": "MOCK — not a real model"},
+  "snapshot": {"sha256": "…", "missing": [], "features": {"…": "same shape"}},
+  "audit_event_id": null,
+  "label": "paper prediction · no trade placed",
+  "trade_placed": false
+}
+```
+
+### 7.3 `GET /predict/accuracy`
+
+Query: `include_mock=false` (default), `limit=500` (predictions scanned). Always 200; empty ledger → zeros with `n_logged: 0` (honest empty, nothing invented). Definitions in §8.
+
+```json
+{
+  "mode": "PAPER",
+  "as_of": "2026-09-30T16:45:00Z",
+  "include_mock": false,
+  "n_logged": 12, "n_resolved": 7, "n_abstained": 3, "n_guessed": 9, "n_resolved_guessed": 6,
+  "abstention_rate": 0.25, "mean_abs_edge": 0.14,
+  "brier": {"model": 0.1132, "market": 0.1604, "baseline_0_5": 0.25,
+            "skill_vs_market": 0.2943, "skill_vs_baseline": 0.5472},
+  "brier_guessed": {"model": 0.0987, "market": 0.1511, "n": 6},
+  "direction_accuracy": 0.8333,
+  "bins": [{"lo": 0.0, "hi": 0.1, "n": 0, "mean_p": null, "event_rate": null}, "… (10 bins)"],
+  "mock_split": {"live": {"n_logged": 12, "n_resolved": 7}, "mock": {"n_logged": 0, "n_resolved": 0}},
+  "label": "paper predictions only · no trade placed"
+}
+```
+
+### 7.4 `POST /predict/{prediction_id}/resolve`
+
+Request: `{"outcome": "YES" | "NO"}` (`extra="forbid"`). Appends one `predict_resolved` event; history is never mutated.
+
+```json
+// 200
+{
+  "mode": "PAPER",
+  "prediction_id": "0e2b8f6c-…",
+  "outcome": "YES",
+  "resolved_at": "2026-09-30T17:00:00Z",
+  "prediction": {"p_yes": 0.67, "direction": "YES", "confidence": 0.34, "abstained": false},
+  "brier": {"model": 0.1089, "market": 0.2025, "baseline_0_5": 0.25,
+            "skill_vs_market": 0.4622, "skill_vs_baseline": 0.5644},
+  "label": "paper prediction · no trade placed"
+}
+```
+
+| Status | Code | When |
+|---|---|---|
+| 404 | `unknown_prediction` | No `predict` event has this `prediction_id` |
+| 409 | `already_resolved` | A `predict_resolved` event exists (previous outcome returned) |
+| 422 | pydantic | `outcome` not YES/NO |
+
+---
+
+## 8. Calibration ledger & metric definitions
+
+Append-only audit events (no new tables, no `state.json` writes, no mutation):
+
+| Event | Payload keys |
+|---|---|
+| `predict` | `prediction_id` (uuid4), `condition_id`, `slug`, `question`, `p_yes`, `market_price`, `edge_vs_market`, `direction`, `confidence`, `abstained`, `abstain_threshold`, `model{mode,mock,version,ensemble_n,disagreement}`, `snapshot_sha256`, `snapshot_ts`, `features{…}`, `missing[]`, `social{relevance,proxy,platforms_ok,missing}`, `reasons[]` |
+| `predict_resolved` | `prediction_id`, `outcome` (YES/NO), `resolved_at`, `source` (`manual`; `gamma` reserved for P1 auto-settle) |
+| `stage_error` | `stage`, `error` — upstream failures; nothing else persisted |
+
+Derived on read by `GET /predict/accuracy` (recomputed per request, so the math is auditable from events alone):
+
+- `outcome = 1` for YES, `0` for NO.
+- `brier.model = mean((p_yes − outcome)²)` over resolved predictions; `brier.market` uses `market_price`; `baseline_0_5 = 0.25` exactly.
+- `skill_vs_market = 1 − model/market` (null when `market` is 0); `skill_vs_baseline = 1 − model/0.25`; 4 dp.
+- `brier_guessed` repeats the model+market pair over resolved **non-abstained** predictions, so the abstention filter's effect is visible, not hidden.
+- `direction_accuracy` over resolved non-abstained: `YES && outcome=1` or `NO && outcome=0`.
+- `abstention_rate = n_abstained/n_logged`; `mean_abs_edge = mean(|edge_vs_market|)` over logged guessed predictions.
+- `bins`: 10 equal-width bins over `p_yes ∈ [0,1]`; each `{lo, hi, n, mean_p, event_rate}`; empty bin → nulls.
+- `mock_split` always reported; headline metrics honor `include_mock` (default **false**) so mock runs can never inflate or deflate claimed accuracy.
+- Tiny-n honesty: every response carries its n; the UI never renders a rate without it.
+
+---
+
+## 9. Frontend contract (Part B)
+
+| Call | When | Use |
+|---|---|---|
+| `GET /predict/demo` | On Predict tab open (zero setup) | Renders a result card immediately; `MOCK` chip + `snapshot_source` note |
+| `POST /predict` `{market_slug}` | On submit | Result card, or the abstention card |
+| `GET /predict/accuracy` | Tab open and after each resolve | Brier tiles + mock/live split |
+| `POST /predict/{prediction_id}/resolve` `{outcome}` | YES/NO buttons on a logged result | Refresh accuracy |
+
+UI states: idle, loading, result, **abstained** (copy: `"no guess — edge 0.041 vs threshold 0.100"`), error (render `ApiError.detail` verbatim). The result card shows `p_yes` vs `market_price` on one bar, a direction chip (YES/NO/ABSTAIN), confidence, edge, the reasons list, and the badge. **No synthetic sample data for this surface** — `/predict/demo` is the sample path; SAMPLE mode renders honest empties (RFC-001 rule).
+
+TS interfaces + `apiPostJson` calls go in `frontend/src/api/client.ts`; no new dependencies.
+
+---
+
+## 10. Files & settings (Part B change list)
+
+**Backend — new**
+
+| File | Contents |
+|---|---|
+| `backend/app/predict.py` | `PredictService`: `resolve_market()`, snapshot/feature builder, `PredictorModel` seam (Jev wrapper + existing MOCK reuse), decision policy, ledger reads; error classes; **no `app.loop` / `app.execution` imports** |
+| `backend/tests/test_api_predict.py` | Route matrix (§11) |
+| `backend/tests/test_predict_features.py` | Hand-computed feature math + parser pins |
+| `backend/tests/test_predict_ledger.py` | Brier/skill/bins/direction math + mock split |
+| `backend/app/social.py` | `SocialAnalyzer`: social-market classifier, bounded Jetstream window (websockets), Reddit JSON + RSS collectors, shared deadline, `chatter_score`/velocity math, proxy labelling; **no `app.loop` / `app.execution` imports** |
+| `backend/tests/test_social_analyzer.py` | Offline fixtures: fake Jetstream event stream, fake Reddit JSON, fake RSS; classifier, math, deadline/omission, proxy labelling |
+
+**Backend — changed (all additive):** `app/polymarket/data_api.py` (`get_trades_v2`), `app/api/server.py` (4 routes, `app.state.predict`), `app/api/schemas.py` (`PredictRequest`, `ResolveRequest`), `app/config.py` (settings below), `app/memory/audit.py` (read helpers `predictions` / `prediction_resolutions`), `tests/test_data_api_v2.py` (+ `/v2/trades` unwrap, no-`usdc_size`, USD formula), `tests/test_scan_prediction_only.py` (guard extended to `app.predict` and `app.social`), `backend/.env.example`, `README.md` env table, `docs/API_INVENTORY.md`, `docs/USER_WORKFLOW.md` (optional).
+
+**Settings (additive, `.env.example` only — no secrets)**
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `PREDICT_ABSTAIN_EDGE` | `0.10` | `\|edge\|` below this → ABSTAIN |
+| `PREDICT_ENSEMBLE_N` | `3` | Jev runs per prediction, clamped 1–5 |
+| `PREDICT_TAPE_LIMIT` | `100` | `/v2/trades` page size |
+| `PREDICT_BOOK_LEVELS` | `5` | Depth levels per book side |
+| `SOCIAL_ENABLED` | `true` | Social pulse for social-outcome markets |
+| `SOCIAL_DEADLINE_SEC` | `4.0` | Shared deadline across sources; drop the slow ones |
+| `SOCIAL_JETSTREAM_URL` | pinned in Part B | Jetstream websocket URL (live-checked) |
+| `SOCIAL_JETSTREAM_WINDOW_SEC` | `3.0` | Bounded connect → count → close window |
+| `SOCIAL_MAX_EVENTS` | `2000` | Hard event cap per window |
+| `SOCIAL_REDDIT_ENABLED` | `true` | Keyless Reddit JSON (custom User-Agent) |
+| `SOCIAL_RSS_MAX_ITEMS` | `10` | RSS items per pulse |
+| `PREDICT_DEMO_SLUG` | pinned in Part B | Demo market (live-verified, long-dated) |
+| `PREDICT_DEMO_LIVE` | `true` | `false` → demo always serves the canned snapshot |
+
+**Frontend — new:** `frontend/src/pages/Predict.tsx`. **Changed (additive):** `api/client.ts`, `components/Nav.tsx`, `App.tsx`, `index.css`.
+
+---
+
+## 11. Test plan
+
+| Route | Happy | Negative 1 | Negative 2 |
+|---|---|---|---|
+| `POST /predict` | Fake Gamma + CLOB + `/v2/trades` + fake Jev → 200; exact `prediction.*` fields; USD = `size × price` from a fixture **with no `usdc_size`**; `predict` event persisted; `audit.query("fill") == []` | Unknown slug → 404 `market_not_found`; nothing persisted | Empty CLOB book → 502 `upstream_error` `source:"clob"`; `stage_error` recorded; no `predict` event |
+| `GET /predict/demo` | All upstreams fail → 200, `snapshot_source:"canned"`, pinned non-abstained guess | Live path succeeds → 200, `snapshot_source:"live"` | Assert **no** `predict` event on either path |
+| `GET /predict/accuracy` | Seed predictions + resolutions → hand-computed Brier/skill/bins | Empty ledger → zeros, `n_logged:0` | Mock-only ledger with `include_mock=false` → zeros; `include_mock=true` → mock counted |
+| `POST /predict/{id}/resolve` | Logged prediction → 200; `predict_resolved` event; accuracy recomputed | Unknown id → 404 | Duplicate → 409 with the previous outcome |
+
+**Unit:** feature math (imbalance, flow, VWAP, momentum windows, volume_accel, null policies); social analyzer (classifier `direct`/`proxy`/`none`, Jetstream window counts, engagement intersection, velocity, deadline drop, proxy labels, `chatter_score` formula); abstention boundary (`edge == threshold` guesses, below abstains); confidence formula; deterministic mock (same snapshot → same `p_yes`).
+
+**Guard/safety:** `test_scan_prediction_only.py` extended to parse `app.predict` and `app.social` — fails on any `PaperEngine` / `app.execution` / `app.loop` identifier, import, or module attribute; a runtime test asserts `/predict` never constructs the paper engine (patch an exploding sentinel). Zero network: every upstream (Gamma/CLOB/Data API/Jev/Jetstream/Reddit/RSS) is monkeypatched.
+
+---
+
+## 12. Risks & mitigations
+
+| # | Risk | L | I | Mitigation |
+|---|---|---|---|---|
+| R1 | `condition_id` resolution surface unverified | M | M | P0 live-check at Part B start; single `resolve_market()` seam; the slug path is verified regardless |
+| R2 | `/v2/trades` row key drift | M | M | Defensive aliases + live-check; key set recorded in `docs/API_INVENTORY.md`; USD formula pinned by test |
+| R3 | Social-source latency/entropy (firehose volume, Reddit 403/429) | M | L | One shared 4 s deadline; Jetstream window capped and closed; a slow/failing source is dropped and listed in `social.missing`; never blocks the response |
+| R4 | Mock mistaken for a real model | M | H | `model.mock` + note + UI MOCK chip + `include_mock=false` default + `mock_split` |
+| R5 | Ensemble cost/latency | L | L | N ≤ 5 (default 3), ~250 ms p50 per Jev call |
+| R6 | Tiny-n accuracy over-claims | M | M | Every metric carries n; no rate is shown without it |
+| R7 | Resolution never happens (far-dated markets) | H | M | Manual resolve is the MVP path; P1 Gamma auto-settle with a confirmed winner (RFC-001 zero-price gotcha) |
+| R8 | Scope creep into gate/loop | L | H | AST guard + §13 do-not-touch list + PR review |
+| R9 | Proxy chatter mistaken for X's own metrics | M | H | X-targeted runs carry `proxy:true` + reason in the state; UI and `reasons` label it a proxy; never presented as platform metrics |
+| R10 | Jetstream v1→v2 endpoint/payload drift | M | M | Live-check at Part B start (v2 serves the v1 JSON payload); URL/path pinned in config; event fixtures pinned by tests |
+
+---
+
+## 13. What we will NOT touch
+
+- `backend/app/loop.py`, `policy/gate.py`, `execution/paper.py`, `scan.py`, `wallets.py`, `jev/client.py`, `scraper/*`, `playtest/*` — **zero edits**. `scraper` functions are imported read-only for RSS (`reddit.py` OAuth stays optional and unused by default).
+- Existing route behavior/shapes (only new routes are mounted); `state.json`; the `events` schema; `killswitch.json`.
+- No new Python/npm dependencies (httpx/feedparser already present); no CI changes; no extension code; no Auth0.
+- No order/signature/private-key anything; no request-body logging; no mock win-rate claims.
+- No `python -m app.loop` runs during Part B verification.
+
+---
+
+## 14. Part B implementation order (after approval)
+
+1. Config + `get_trades_v2` + live-checks (`/v2/trades` keys, `condition_id` lookup, Jetstream URL/payload, Reddit JSON behavior); record in `docs/API_INVENTORY.md`; unit tests.
+2. `app/predict.py` (features → model → policy → ledger) + `app/social.py` (classifier → pulse) + unit tests.
+3. `schemas.py` + routes in `server.py` + endpoint tests (1 happy + 2 negative each) + guard extension.
+4. Docs (inventory correction incl. the social-sources table, env table, README, workflow note).
+5. Frontend Predict tab + client + nav + build.
+6. Full verify: `cd backend && python -m pytest -q` (all green); `python -c "import app.predict, app.api.server, app.polymarket.data_api"`; `cd frontend && npm run build` (locally via `./node_modules/.bin/tsc -b && ./node_modules/.bin/vite build`).
+7. Open a PR against `main` with evidence. **Stop — no merge until instructed.**
+
+**Estimated review surface:** ~2 new backend modules, 5 changed backend files (all additive), 4 new test files + 2 extended, 1 new frontend page, 4 changed frontend files, docs.
+
+---
+
+**STOP — Part A ends here. Awaiting approval before any code.**

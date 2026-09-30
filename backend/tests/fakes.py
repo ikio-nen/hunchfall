@@ -208,12 +208,76 @@ class FakeJev:
         pass
 
 
+def trade_v2_items() -> list[dict]:
+    """Rows in the *real* ``/v2/trades`` shape: price/size/side/timestamp.
+
+    These rows carry **no ``usdc_size``** — USD notional is ``size × price``
+    (RFC-003 §3). Hand-computed expectations for this fixture:
+    buy = 1200*0.50 + 600*0.51 = 906.0, sell = 800*0.49 = 392.0,
+    vwap = 1298/2600 = 0.499231.
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    return [
+        {"price": 0.50, "size": 1200.0, "side": "BUY", "timestamp": now - 60},
+        {"price": 0.51, "size": 600.0, "side": "BUY", "timestamp": now - 30},
+        {"price": 0.49, "size": 800.0, "side": "SELL", "timestamp": now - 10},
+    ]
+
+
+class FakeTradesApi:
+    """Data API stub serving the ``/v2/trades`` predictor tape."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        items: list[dict] | None = None,
+        fail: bool = False,
+    ) -> None:
+        self.settings = settings
+        self.items = items if items is not None else trade_v2_items()
+        self.fail = fail
+        self.calls: list[dict] = []
+
+    def get_trades_v2(self, condition: str, limit: int = 100, cursor=None) -> list[dict]:
+        self.calls.append({"condition": condition, "limit": limit})
+        if self.fail:
+            raise DataApiError("data-api down")
+        return [dict(item) for item in self.items]
+
+    def close(self) -> None:
+        pass
+
+
 def patch_scan(monkeypatch, *, gamma=None, clob=None, data_api=None, jev=None) -> None:
     """Point ``app.scan`` at the offline fakes."""
     monkeypatch.setattr("app.scan.GammaClient", gamma or FakeGamma)
     monkeypatch.setattr("app.scan.ClobClient", clob or FakeClob)
     monkeypatch.setattr("app.scan.DataApiClient", data_api or FakeDataApi)
     monkeypatch.setattr("app.scan.JevClient", jev or FakeJev)
+
+
+def patch_predict(monkeypatch, *, gamma=None, clob=None, data_api=None, jev=None) -> None:
+    """Point ``app.predict`` at the offline fakes."""
+    monkeypatch.setattr("app.predict.GammaClient", gamma or FakeGamma)
+    monkeypatch.setattr("app.predict.ClobClient", clob or FakeClob)
+    monkeypatch.setattr("app.predict.DataApiClient", data_api or FakeTradesApi)
+    monkeypatch.setattr("app.predict.JevClient", jev or FakeJev)
+
+
+def patch_social(
+    monkeypatch, *, jetstream=None, reddit=None, rss=None
+) -> None:
+    """Point ``app.social`` collectors at offline fakes (never touch network)."""
+    monkeypatch.setattr("app.social.collect_jetstream", jetstream or (lambda s, t, to: None))
+    monkeypatch.setattr("app.social.collect_reddit", reddit or (lambda s, t, to: None))
+    monkeypatch.setattr("app.social.collect_rss", rss or (lambda s, t, to: None))
+
+
+def predict_body(**overrides) -> dict:
+    """A valid ``POST /predict`` request body."""
+    body = {"market_slug": "will-it-rain-tomorrow"}
+    body.update(overrides)
+    return body
 
 
 def scan_body(**overrides) -> dict:

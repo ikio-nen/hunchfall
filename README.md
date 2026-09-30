@@ -153,6 +153,19 @@ Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 | `WALLET_LABEL_MAX_CHARS` | `64` | watch-only wallet label length cap |
 | `SCAN_CLOCK_SKEW_SEC` | `300` | reject extension scans with client clock drift beyond this |
 | `SCAN_PAGE_STATE_MAX_BYTES` | `4096` | cap on untrusted page_state (hashed, never stored raw) |
+| `PREDICT_ABSTAIN_EDGE` | `0.10` | guesser abstains when \|P(YES) − market\| is below this |
+| `PREDICT_ENSEMBLE_N` | `3` | model runs per prediction (median wins), clamped 1–5 |
+| `PREDICT_TAPE_LIMIT` | `100` | `/v2/trades` page size for the predictor tape |
+| `PREDICT_BOOK_LEVELS` | `5` | book depth levels per side |
+| `PREDICT_DEMO_SLUG` | `will-bitcoin-hit-100k-in-2026` | pinned demo market |
+| `PREDICT_DEMO_LIVE` | `true` | `false` = demo always serves the canned snapshot |
+| `SOCIAL_ENABLED` | `true` | social pulse for social-outcome markets (a feature, never the decision) |
+| `SOCIAL_DEADLINE_SEC` | `4.0` | one shared deadline across social sources |
+| `SOCIAL_JETSTREAM_URL` | `wss://jetstream2.us-east.bsky.network/subscribe` | keyless Bluesky Jetstream (live-verified) |
+| `SOCIAL_JETSTREAM_WINDOW_SEC` | `3.0` | bounded connect → count → close window |
+| `SOCIAL_MAX_EVENTS` | `2000` | hard event cap per Jetstream window |
+| `SOCIAL_REDDIT_ENABLED` | `true` | keyless Reddit JSON (best-effort; 403s degrade to `missing`) |
+| `SOCIAL_RSS_MAX_ITEMS` | `10` | RSS items per social pulse |
 | `REDDIT_CLIENT_ID` | — | Reddit API client id (optional; needs pre-approval) |
 | `REDDIT_CLIENT_SECRET` | — | Reddit API client secret |
 | `REDDIT_USER_AGENT` | `hunchfall` | Reddit API user agent |
@@ -169,7 +182,13 @@ Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 
 `GET /status` · `GET /positions` · `GET /signals` · `GET /vetoes` ·
 `GET /fills` · `GET /calibration` · `POST /kill` · `POST /resume` ·
-`GET /config` (safe subset). Full endpoint notes: `docs/API_INVENTORY.md`.
+`GET /config` (safe subset).
+
+RFC-003 market guesser (prediction only — no gate, no sizing, no fills):
+`POST /predict` · `GET /predict/demo` · `GET /predict/accuracy` ·
+`POST /predict/{prediction_id}/resolve`. Every response carries
+**“paper prediction · no trade placed”**; the mock path is labelled
+`MOCK — not a real model`. Full endpoint notes: `docs/API_INVENTORY.md`.
 
 ## Demo script (~3 minutes)
 

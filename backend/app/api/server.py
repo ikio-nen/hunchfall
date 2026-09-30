@@ -24,7 +24,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.api.schemas import ScanRequest, ValidateRequest, WalletCreateRequest
+from app.api.schemas import (
+    PredictRequest,
+    ResolveRequest,
+    ScanRequest,
+    ValidateRequest,
+    WalletCreateRequest,
+)
 from app.memory.audit import AuditLog
 from app.paths import (
     read_killswitch,
@@ -33,6 +39,7 @@ from app.paths import (
     write_killswitch,
 )
 from app.polymarket.clob import ClobClient
+from app.predict import PredictError, PredictService
 from app.scan import ScanError, ScanService
 from app.wallets import (
     SECRET_REJECT_MESSAGE,
@@ -197,10 +204,12 @@ def create_app(settings) -> FastAPI:
     audit = AuditLog(db_path)
     wallets = WalletRegistry(db_path)
     scan_service = ScanService(settings, audit)
+    predict_service = PredictService(settings, audit)
     app.state.settings = settings
     app.state.audit = audit
     app.state.wallets = wallets
     app.state.scan = scan_service
+    app.state.predict = predict_service
 
     @app.get("/")
     def root() -> dict:
@@ -538,5 +547,47 @@ def create_app(settings) -> FastAPI:
             "label": "paper predictions only",
             "marketplaces": audit.marketplace_counts(),
         }
+
+    # --------------------------------------------------------------------- #
+    # RFC-003 additions — market guesser (prediction only)                  #
+    # --------------------------------------------------------------------- #
+
+    def _predict_http_error(exc: PredictError) -> HTTPException:
+        """Map a PredictError to the RFC-001 error envelope."""
+        detail: dict[str, Any] = {"code": exc.code, "message": exc.message}
+        if exc.source:
+            detail["source"] = exc.source
+        return HTTPException(status_code=exc.status, detail=detail)
+
+    @app.post("/predict")
+    def predict(req: PredictRequest) -> dict:
+        """Guess a market's outcome: P(YES), direction, confidence — or abstain.
+
+        Prediction only. Gamma + CLOB are required (502 + nothing persisted on
+        failure); the tape and the social pulse are features. Every response
+        carries ``label`` + ``trade_placed:false``.
+        """
+        try:
+            return predict_service.run(req.model_dump())
+        except PredictError as exc:
+            raise _predict_http_error(exc) from exc
+
+    @app.get("/predict/demo")
+    def predict_demo() -> dict:
+        """Run the pinned demo market; canned fallback. Always 200, never persists."""
+        return predict_service.demo()
+
+    @app.get("/predict/accuracy")
+    def predict_accuracy(include_mock: bool = False, limit: int = 500) -> dict:
+        """Derived-on-read calibration ledger (mock excluded by default)."""
+        return predict_service.accuracy(include_mock=include_mock, limit=limit)
+
+    @app.post("/predict/{prediction_id}/resolve")
+    def predict_resolve(prediction_id: str, req: ResolveRequest) -> dict:
+        """Record the realised YES/NO outcome for one logged prediction."""
+        try:
+            return predict_service.resolve_prediction(prediction_id, req.outcome)
+        except PredictError as exc:
+            raise _predict_http_error(exc) from exc
 
     return app

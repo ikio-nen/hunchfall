@@ -8,7 +8,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 
 class ScanRequest(BaseModel):
@@ -46,6 +52,43 @@ class ValidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     outcome: Literal["HIT", "MISS"]
+
+
+class PredictRequest(BaseModel):
+    """``POST /predict`` body — **exactly one** market identifier.
+
+    Prediction only: the guesser takes a market and returns P(YES) or an
+    honest abstention. It never accepts secrets, wallet addresses, or sizing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    market_slug: str | None = Field(
+        default=None, min_length=1, max_length=160, pattern=r"^[A-Za-z0-9._~-]+$"
+    )
+    condition_id: str | None = Field(
+        default=None, pattern=r"^0x[0-9a-fA-F]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_identifier(self) -> "PredictRequest":
+        """Require exactly one of market_slug / condition_id."""
+        provided = [
+            value for value in (self.market_slug, self.condition_id) if value
+        ]
+        if len(provided) != 1:
+            raise ValueError(
+                "provide exactly one of market_slug or condition_id"
+            )
+        return self
+
+
+class ResolveRequest(BaseModel):
+    """``POST /predict/{prediction_id}/resolve`` body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    outcome: Literal["YES", "NO"]
 
 
 class WalletCreateRequest(BaseModel):

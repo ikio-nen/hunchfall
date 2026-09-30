@@ -5,6 +5,7 @@ export const TABS = [
   { id: "vetoes", label: "Vetoes" },
   { id: "fills", label: "Fills" },
   { id: "calibration", label: "Calibration" },
+  { id: "predict", label: "Predict" },
   { id: "marketplaces", label: "Marketplaces" },
   { id: "wallets", label: "Wallets" },
   { id: "prove", label: "Prove" },

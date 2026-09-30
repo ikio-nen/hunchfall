@@ -39,3 +39,25 @@ No order placed. No wallet touched. The live market itself is the scoreboard.
 - `POST /wallets` + `GET /wallets/{address}/activity` — watch-only registry
   (secrets rejected with 400) and read-only activity with graceful degradation.
 - `GET /marketplaces` — per-marketplace scans/hunches/validations.
+
+## Implemented in RFC-003 (market guesser — prediction only)
+
+- `POST /predict` — given `{market_slug | condition_id}`, builds a snapshot
+  from official APIs (Gamma + CLOB, plus a `/v2/trades` tape) and a keyless
+  social pulse, asks the model N times for **P(YES)**, and returns a typed
+  prediction — or an honest **abstention** when `|edge| < PREDICT_ABSTAIN_EDGE`.
+  No gate, no sizing, no fills.
+- `GET /predict/demo` — runs the pinned demo market; falls back to a committed
+  canned snapshot, so the dashboard shows a real result card with zero setup.
+  **Always 200, never persists.**
+- `GET /predict/accuracy` — derived-on-read ledger: Brier vs market vs
+  always-0.5, Brier skill, direction accuracy, abstention rate, and a
+  mock/live split (mock excluded from the headline by default).
+- `POST /predict/{prediction_id}/resolve` — records the realised YES/NO
+  outcome (append-only; manual settlement for the MVP).
+
+The social-media analyzer (Bluesky Jetstream + Reddit + RSS, all keyless) is
+**the data source for social-outcome markets** — post counts and engagement in
+a bounded window, not generic sentiment. X is excluded; X-centric markets are
+labelled a **proxy**. Its numbers are a feature in the snapshot and the UI —
+they can never set the direction or the abstention.

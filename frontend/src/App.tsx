@@ -7,6 +7,7 @@ import Signals from "./pages/Signals";
 import Vetoes from "./pages/Vetoes";
 import Fills from "./pages/Fills";
 import Calibration from "./pages/Calibration";
+import Predict from "./pages/Predict";
 import Marketplaces from "./pages/Marketplaces";
 import Wallets from "./pages/Wallets";
 import Prove from "./pages/Prove";
@@ -70,6 +71,7 @@ export default function App() {
         {tab === "vetoes" && <Vetoes />}
         {tab === "fills" && <Fills />}
         {tab === "calibration" && <Calibration />}
+        {tab === "predict" && <Predict />}
         {tab === "marketplaces" && <Marketplaces />}
         {tab === "wallets" && <Wallets />}
         {tab === "prove" && <Prove />}

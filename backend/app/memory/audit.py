@@ -199,6 +199,36 @@ class AuditLog:
         """All ``validation`` events, newest first."""
         return self.query("validation", limit=limit)
 
+    def predictions(self, limit: int = 500) -> list[dict]:
+        """All ``predict`` (market-guesser) events, newest first."""
+        return self.query("predict", limit=limit)
+
+    def prediction_resolutions(self, limit: int = 500) -> list[dict]:
+        """All ``predict_resolved`` events, newest first."""
+        return self.query("predict_resolved", limit=limit)
+
+    def prediction_by_id(self, prediction_id: str) -> dict | None:
+        """Find one ``predict`` event by its uuid; None when absent."""
+        wanted = str(prediction_id or "")
+        if not wanted:
+            return None
+        for event in self.query("predict", limit=5000):
+            payload = event.get("payload") or {}
+            if str(payload.get("prediction_id") or "") == wanted:
+                return event
+        return None
+
+    def prediction_resolution(self, prediction_id: str) -> dict | None:
+        """Newest ``predict_resolved`` event for a prediction, if any."""
+        wanted = str(prediction_id or "")
+        if not wanted:
+            return None
+        for event in self.query("predict_resolved", limit=5000):
+            payload = event.get("payload") or {}
+            if str(payload.get("prediction_id") or "") == wanted:
+                return event
+        return None
+
     def equity_curve(self, limit: int = 200) -> list[dict]:
         """Paper equity points from ``cycle_end`` events, oldest first.
 
