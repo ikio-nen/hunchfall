@@ -3,11 +3,13 @@
 | | |
 |---|---|
 | **RFC** | RFC-001 |
-| **Status** | PROPOSED — Phase 1 (plan only), awaiting review |
+| **Status** | **DONE** — approved 2026-09-30; implemented in Phase 2; merged via PR [#1](https://github.com/ikio-nen/hunchfall/pull/1) (rebase-merge `bd5a0f8`), CI green |
 | **Repo / branch** | `D:\hunchfall` @ `main` |
 | **Date** | 2026-09-30 |
 | **Deliverable of Phase 1** | This file at `D:\hunchfall\RFC.md`. **No implementation code in this phase.** |
 
+> **Phase 2 complete (2026-09-30):** all planned routes, wallet surfaces, and dashboard tabs were implemented, rebase-merged via PR #1, and confirmed green in CI — this section is kept as the historical record of what was planned and built.
+>
 > **APPROVAL SCOPE:** On approval, the only action is writing this document to `RFC.md` at the repo root, then stopping. Phase 2 (implementation) starts only after a separate explicit approval.
 
 ---
