@@ -7,6 +7,9 @@ import Signals from "./pages/Signals";
 import Vetoes from "./pages/Vetoes";
 import Fills from "./pages/Fills";
 import Calibration from "./pages/Calibration";
+import Marketplaces from "./pages/Marketplaces";
+import Wallets from "./pages/Wallets";
+import Prove from "./pages/Prove";
 import { useData } from "./state/dataMode";
 
 export default function App() {
@@ -67,6 +70,9 @@ export default function App() {
         {tab === "vetoes" && <Vetoes />}
         {tab === "fills" && <Fills />}
         {tab === "calibration" && <Calibration />}
+        {tab === "marketplaces" && <Marketplaces />}
+        {tab === "wallets" && <Wallets />}
+        {tab === "prove" && <Prove />}
       </main>
 
       <HonestyPanel />

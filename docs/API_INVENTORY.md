@@ -46,10 +46,39 @@ General CLOB limit: 9000 req / 10s.
 
 | Endpoint | Method | Auth? | Rate limit | Used for | Status |
 |---|---|---|---|---|---|
-| `/trades` | GET | No (public) | 200 req / 10s | trade tape (last-trade timestamp, audited) | verified |
+| `/trades` | GET | No (public) | 200 req / 10s | legacy trade tape (loop only; v1 retires 2026-10-24) | verified |
 | `/v2/prices-history` | GET | No (public) | 200 req / 10s | price history v2 | verified |
 | `/holders` | GET | No (public) | (general) | holder distribution per market | verified |
 | `/oi` | GET | No (public) | (general) | open interest per market | verified |
+
+### Data API v2 — verified params (2026-09-30, official openapi.json)
+
+Global rules: responses are wrapped in `{"data": ..., "pagination": {"next_cursor": ...}}`;
+**no `offset` param** (sending one returns 400); params accept snake_case and
+camelCase; `429` carries `Retry-After`; a documented miss returns an empty
+`data` array (valid zero-state); all public, no auth. **v1 retires 2026-10-24.**
+
+| Endpoint | Verified params | Used for | Status |
+|---|---|---|---|
+| `/v2/activity` | `user` (required, EVM address); `type` (comma-separated, e.g. `TRADE`; `TIP` opt-in only); `condition` (≤20 ids; aliases `condition_id`/`conditionId`); `event_id` (≤20, mutually exclusive with `condition`); `side`; `start`/`end` (epoch s); `limit` (default 100, max 1000); `cursor`; `sort_direction`; `exclude_deposits_withdrawals` (default true) | extension-scan trade tape (`type=TRADE&condition=`) + wallet activity feed (`user`) | verified |
+| `/v2/positions` | `user`; `status` (`OPEN`/`CLOSED`); `limit`; `cursor` | watch-only wallet open positions | verified |
+
+Note: `/v2/trades` query params are NOT verified — new code uses
+`/v2/activity?type=TRADE` instead. A non-proxy-wallet `user` returns an empty
+`data` array; treat as "no activity", not an error.
+
+## hunchfall backend routes — RFC-001 additions (2026-09-30)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/extension/scan` | POST | Re-validate a page hint (Gamma → CLOB → Data API v2 → Jev → risk gate) and persist a paper prediction. Never places a fill. |
+| `/signals/{id}/validate` | POST | Record a HIT/MISS verdict (append-only); 404 unknown, 409 duplicate; calibration derived on read. |
+| `/wallets` | POST | Watch-only registry; anything resembling a private key or mnemonic → 400, never echoed/stored. |
+| `/wallets/{address}/activity` | GET | Read-only activity (Data API v2 + public Polygon RPC balance/nonce); 404 unregistered; graceful `degraded` on partial outage. |
+| `/marketplaces` | GET | Scans / hunches / validations grouped per marketplace. |
+
+`GET /status` also gained an additive `equity_curve` field derived from
+`cycle_end` audit events.
 
 ## CLOB websocket (optional upgrade)
 

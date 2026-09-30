@@ -1,14 +1,23 @@
 import { useEffect, useState } from "react";
-import type { Position, Status } from "../api/client";
-import { apiList } from "../api/client";
+import type { EquityPoint, Position, Status } from "../api/client";
+import { toEquityPoints, toStatus } from "../api/client";
 import { sampleEquityCurve, samplePositions, sampleStatus } from "../api/sampleData";
 import { useData } from "../state/dataMode";
 import EquityChart from "../components/EquityChart";
 import StatCard from "../components/StatCard";
 import KillButton from "../components/KillButton";
-import type { EquityPoint } from "../api/sampleData";
 
-const usd = (n: number) => `$${n.toFixed(2)}`;
+/** Live fallback: honest nulls until the loop writes real state. */
+const EMPTY_STATUS: Status = {
+  bankroll: null,
+  equity: null,
+  exposure_usd: null,
+  kill_switch_engaged: false,
+  mode: "PAPER",
+};
+
+const usd = (n: number | null | undefined) =>
+  typeof n === "number" && Number.isFinite(n) ? `$${n.toFixed(2)}` : "—";
 
 export default function Overview() {
   const { sampleMode, fetchList, fetchOne } = useData();
@@ -16,26 +25,28 @@ export default function Overview() {
   const [positions, setPositions] = useState<Position[]>([]);
   const [curve, setCurve] = useState<EquityPoint[]>(sampleEquityCurve);
   const [loading, setLoading] = useState(true);
-
   const [killEngaged, setKillEngaged] = useState(false);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
     Promise.all([
-      fetchOne<Status>("/status", sampleStatus),
+      fetchOne<unknown>("/status", sampleStatus),
       fetchList<Position>("/positions", samplePositions),
-      // Equity history: sample data always available; live backend may not
-      // expose /equity — on failure we just show the current equity stat.
-      sampleMode
-        ? Promise.resolve(sampleEquityCurve)
-        : apiList<EquityPoint>("/equity").catch(() => [] as EquityPoint[]),
     ])
-      .then(([st, pos, eq]) => {
+      .then(([rawStatus, pos]) => {
         if (!alive) return;
+        const st = sampleMode ? (rawStatus as Status) : toStatus(rawStatus, EMPTY_STATUS);
+        const points = sampleMode ? sampleEquityCurve : toEquityPoints(rawStatus);
         setStatus(st);
         setPositions(pos);
-        setCurve(eq.length > 0 ? eq : [{ ts: new Date().toISOString(), equity: st.equity, ...({ sample: false } as const) }]);
+        setCurve(
+          points.length > 0
+            ? points
+            : typeof st.equity === "number"
+              ? [{ ts: new Date().toISOString(), equity: st.equity }]
+              : [],
+        );
         setKillEngaged(st.kill_switch_engaged);
         setLoading(false);
       })
@@ -50,6 +61,12 @@ export default function Overview() {
   const openCount = positions.length;
   const totalUnrealized = positions.reduce((s, p) => s + p.unrealized_pnl, 0);
   const mode = status.mode || "PAPER";
+  const equityTone =
+    typeof status.equity === "number" && typeof status.bankroll === "number"
+      ? status.equity >= status.bankroll
+        ? "green"
+        : "red"
+      : undefined;
 
   return (
     <div>
@@ -59,15 +76,15 @@ export default function Overview() {
         <>
           <div className="stats-grid">
             <StatCard label="Bankroll" value={usd(status.bankroll)} />
-            <StatCard
-              label="Equity"
-              value={usd(status.equity)}
-              tone={status.equity >= status.bankroll ? "green" : "red"}
-            />
+            <StatCard label="Equity" value={usd(status.equity)} tone={equityTone} />
             <StatCard
               label="Exposure (USD)"
               value={usd(status.exposure_usd)}
-              tone={status.exposure_usd > 500 ? "amber" : undefined}
+              tone={
+                typeof status.exposure_usd === "number" && status.exposure_usd > 500
+                  ? "amber"
+                  : undefined
+              }
             />
             <StatCard label="Open positions" value={String(openCount)} />
             <StatCard

@@ -8,6 +8,7 @@
 
 import type {
   CalibrationReport,
+  EquityPoint,
   Fill,
   Position,
   Signal,
@@ -17,11 +18,9 @@ import type {
 
 const sample = { sample: true } as const;
 
-export interface EquityPoint {
-  ts: string;
-  equity: number;
-  sample?: boolean;
-}
+// EquityPoint now lives in the shared API client; re-exported so existing
+// imports (`../api/sampleData`) keep working.
+export type { EquityPoint };
 
 export const samplePositions: Position[] = [
   { market_id: "0x1a2b", side: "YES", contracts: 120, avg_price: 0.52, current_price: 0.61, unrealized_pnl: 10.8, ...sample },

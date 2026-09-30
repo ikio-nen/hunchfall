@@ -147,6 +147,12 @@ Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 | `KILL_DRAWDOWN_PCT` | `15` | auto kill-switch drawdown threshold (%) |
 | `PAPER_BANKROLL_USD` | `10000` | virtual starting bankroll (paper only) |
 | `FEE_RATE_OVERRIDE` | `0.0` | per-market authoritative fee rate override (0 = category table) |
+| `POLYGON_RPC_URL` | `https://polygon-rpc.com` | public Polygon RPC (read-only balance/nonce only) |
+| `WALLET_ACTIVITY_LIMIT` | `50` | items fetched per wallet-activity source |
+| `WALLET_ACTIVITY_TTL_SEC` | `60` | in-process wallet-activity cache TTL (0 = off) |
+| `WALLET_LABEL_MAX_CHARS` | `64` | watch-only wallet label length cap |
+| `SCAN_CLOCK_SKEW_SEC` | `300` | reject extension scans with client clock drift beyond this |
+| `SCAN_PAGE_STATE_MAX_BYTES` | `4096` | cap on untrusted page_state (hashed, never stored raw) |
 | `REDDIT_CLIENT_ID` | — | Reddit API client id (optional; needs pre-approval) |
 | `REDDIT_CLIENT_SECRET` | — | Reddit API client secret |
 | `REDDIT_USER_AGENT` | `hunchfall` | Reddit API user agent |

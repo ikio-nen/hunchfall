@@ -11,7 +11,7 @@ predictions against live Polymarket prices without ever placing a trade.
 |---|--------|-------------------|-----|
 | 1 | Overview | Paper bankroll equity curve, open paper positions, today's hunches, kill-switch state | `GET /status` |
 | 2 | Hunches | Prediction feed — market, P(true), live price, edge %, YES/NO side, timestamp; tap for full reasoning | `GET /signals` |
-| 3 | Validation ⭐ | Did the AI get it right? Predicted direction vs live price now, HIT ✓ / MISS ✗ stamped per hunch | `POST /signals/{id}/validate` (**not built yet**) |
+| 3 | Validation ⭐ | Did the AI get it right? Predicted direction vs live price now, HIT ✓ / MISS ✗ stamped per hunch | `POST /signals/{id}/validate` (built — RFC-001) |
 | 4 | Positions | Paper book — simulated fills at live CLOB prices, fees applied, P&L, MOCK labels | `GET /positions` |
 | 5 | Vetoes | Every abstention with its reason (spread too wide, UMA risk, low confidence…) | `GET /vetoes` |
 | 6 | Kill switch | Big red button — halts the loop, flattens the paper book; resume is human-only | `POST /kill` |
@@ -29,8 +29,13 @@ ever-present escape hatch.
 
 No order placed. No wallet touched. The live market itself is the scoreboard.
 
-## Backend work needed
+## Implemented in RFC-001
 
-- `POST /signals/{id}/validate` — snapshot price at signal time, re-check on
-  demand, persist the HIT/MISS verdict. (Everything else on this page maps to
-  endpoints that already exist.)
+- `POST /signals/{id}/validate` — records the HIT/MISS verdict (append-only),
+  re-checks the live CLOB price as evidence, and updates calibration on read.
+- `POST /extension/scan` — re-validates a market-page hint through Gamma,
+  CLOB, and Data API v2 before recording a paper prediction
+  (“paper prediction · no trade placed” — no fill is ever placed).
+- `POST /wallets` + `GET /wallets/{address}/activity` — watch-only registry
+  (secrets rejected with 400) and read-only activity with graceful degradation.
+- `GET /marketplaces` — per-marketplace scans/hunches/validations.

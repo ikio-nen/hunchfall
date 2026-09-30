@@ -74,6 +74,22 @@ class Settings(BaseSettings):
     # to category rates in app/execution/paper.py FEE_RATES.
     FEE_RATE_OVERRIDE: float = 0.0  # 0 = disabled, use category rates
 
+    # ---- Watch-only wallets (read-only, keyless) ------------------------------
+    # Public Polygon JSON-RPC endpoint. ONLY eth_getBalance and
+    # eth_getTransactionCount are ever called — no signing, no key material.
+    POLYGON_RPC_URL: str = "https://polygon-rpc.com"
+    WALLET_ACTIVITY_LIMIT: int = 50  # items fetched per source
+    WALLET_ACTIVITY_TTL_SEC: int = 60  # in-process activity cache TTL (0 = off)
+    WALLET_LABEL_MAX_CHARS: int = 64
+
+    # ---- Extension scan (prediction only) -------------------------------------
+    # Reject a scan whose client clock drifts from the server by more than
+    # this (seconds); server time is always the source of truth.
+    SCAN_CLOCK_SKEW_SEC: int = 300
+    # Hard cap on the untrusted page_state payload size (bytes). It is hashed
+    # and redacted, never stored raw, and never trusted for prices.
+    SCAN_PAGE_STATE_MAX_BYTES: int = 4096
+
     # ---- Story sources ---------------------------------------------------------
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""
