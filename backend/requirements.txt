@@ -1,0 +1,12 @@
+# Merged from REQUIREMENTS_DATA.txt (data layer) + trading-core needs.
+fastapi
+uvicorn
+httpx>=0.27
+pydantic>=2.0
+pydantic-settings>=2.0
+pytest
+# RSS news sources (Google News RSS + outlet feeds) — keyless.
+feedparser
+# Optional CLOB websocket upgrade (app/polymarket/ws.py); --watch works
+# without it (REST polling).
+websockets
