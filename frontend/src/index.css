@@ -377,3 +377,175 @@ body {
   font-size: 11px;
   color: var(--muted);
 }
+
+/* ---- RFC-001 additions (badge, marketplace cards, wallet form) ---- */
+.paper-pred-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(181, 241, 60, 0.08);
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.badge-chip {
+  margin-left: 6px;
+}
+
+.section-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0 0 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error-text {
+  color: var(--red);
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.market-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px;
+}
+
+.market-card-name {
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.market-card-stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.market-card-stats b {
+  color: var(--text);
+}
+
+.market-card-foot {
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.wallet-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 520px;
+  margin-bottom: 8px;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.form-input {
+  background: #0e1117;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.form-input:focus {
+  outline: 1px solid var(--accent);
+}
+
+.btn-primary {
+  align-self: flex-start;
+  background: var(--accent);
+  color: #10140a;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.btn-mini {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-mini:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.btn-mini:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.verdict-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.wallet-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+
+.registered-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.wallet-chip {
+  text-align: left;
+  background: #0e1117;
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  font: inherit;
+}
+
+.wallet-chip:hover {
+  border-color: var(--accent);
+}
