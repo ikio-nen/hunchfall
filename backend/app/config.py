@@ -57,6 +57,16 @@ class Settings(BaseSettings):
     NEGRISK_SUM_MAX: float = 1.02
     JEV_CONFIDENCE_MIN: float = 0.6  # veto if Jev choice confidence < this
 
+    # ---- Auth0 (dashboard login; empty = auth disabled) ---------------------
+    # Fill from the Auth0 dashboard when wiring login. The API will validate
+    # the Auth0-issued JWT; the SPA uses the VITE_AUTH0_* frontend variables.
+    AUTH0_DOMAIN: str = ""
+    AUTH0_CLIENT_ID: str = ""
+    AUTH0_CLIENT_SECRET: str = ""
+    AUTH0_AUDIENCE: str = ""
+    # Normally https://<AUTH0_DOMAIN>/; set explicitly for custom domains.
+    AUTH0_ISSUER: str = ""
+
     # ---- Paper portfolio -----------------------------------------------------
     PAPER_BANKROLL_USD: float = 10000.0
     # Taker fee rate override (per-market payload authoritative when present;
