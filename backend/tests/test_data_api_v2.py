@@ -1,8 +1,9 @@
 """Data API v2 client units: envelope, no-offset, Retry-After, zero-state."""
 
 import httpx
+import pytest
 
-from app.polymarket.data_api import DataApiClient
+from app.polymarket.data_api import DataApiClient, DataApiError
 from tests.fakes import make_settings
 
 
@@ -108,3 +109,36 @@ def test_trades_v2_empty_data_is_zero_state(tmp_path):
     client = _client(tmp_path)
     client._http = FakeHttp([FakeResponse(200, {"data": [], "pagination": {}})])
     assert client.get_trades_v2(condition="0xcond", limit=5) == []
+
+
+def test_retry_after_503_is_honored_like_429(monkeypatch, tmp_path):
+    """A transient 503 is retried, honoring its ``Retry-After`` header."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "app.polymarket.data_api.time.sleep", lambda seconds: sleeps.append(seconds)
+    )
+    client = _client(tmp_path)
+    client._http = FakeHttp(
+        [
+            FakeResponse(503, headers={"Retry-After": "3"}),
+            FakeResponse(200, {"data": [{"c": 3}], "pagination": {}}),
+        ]
+    )
+    out = client.get_trades_v2(condition="0xcond", limit=5)
+    assert out == [{"c": 3}]
+    assert sleeps == [3.0]
+    assert len(client._http.calls) == 2
+
+
+def test_503_exhausts_two_retries_with_the_sleep_capped_at_5s(monkeypatch, tmp_path):
+    """At most two retries; a long ``Retry-After`` waits 5s, then DataApiError."""
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "app.polymarket.data_api.time.sleep", lambda seconds: sleeps.append(seconds)
+    )
+    client = _client(tmp_path)
+    client._http = FakeHttp([FakeResponse(503, headers={"Retry-After": "120"})] * 3)
+    with pytest.raises(DataApiError):
+        client.get_trades_v2(condition="0xcond", limit=5)
+    assert sleeps == [5.0, 5.0]
+    assert len(client._http.calls) == 3  # first attempt + two retries, no more

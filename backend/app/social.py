@@ -208,7 +208,8 @@ def classify_market(market: dict) -> dict:
             "proxy": True,
             "reason": (
                 "X-centric market — X has no free tier, so cross-platform "
-                "chatter is reported as a labelled proxy"
+                "chatter is reported as a labelled proxy; the Bluesky window "
+                "is network-wide (unfiltered)"
             ),
             "subject": terms,
             "terms": terms,
@@ -216,7 +217,10 @@ def classify_market(market: dict) -> dict:
     return {
         "relevance": "direct",
         "proxy": False,
-        "reason": "subject observable on Bluesky (keyless Jetstream window)",
+        "reason": (
+            "subject observable on Bluesky (keyless Jetstream window) — the "
+            "window counts are network-wide (unfiltered), not subject-only"
+        ),
         "subject": terms,
         "terms": terms,
     }
@@ -229,10 +233,17 @@ def collect_jetstream(settings: Settings, terms: str, timeout: float) -> dict | 
     Counts ``app.bsky.feed.post`` creates in the window; likes and reposts
     whose payload is observed are treated as engagement signals.
 
+    **The counts are network-wide and unfiltered.** The public tail is not
+    keyword-filtered (no server-side or client-side subject filter in the
+    MVP), so ``posts`` / ``engagements`` describe the whole Bluesky firehose
+    during the window, not the market's subject. Every surface that shows
+    these numbers labels them ``network-wide (unfiltered)`` rather than
+    presenting them as the subject's own social pulse.
+
     Args:
         settings: App Settings (URL + caps).
-        terms: Search/subject terms (currently used for logging only — the
-            Jetstream tail is not server-side filtered in the MVP).
+        terms: Search/subject terms (currently used for logging only —
+            the Jetstream tail is not server-side filtered in the MVP).
         timeout: Wall-clock seconds for the whole window.
 
     Returns:

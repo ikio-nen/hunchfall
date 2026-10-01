@@ -186,6 +186,48 @@ def test_demo_falls_back_to_canned_when_upstreams_fail(tmp_path, monkeypatch):
     assert _audit(settings).predictions() == []
 
 
+def test_abstain_edge_of_zero_never_abstains(tmp_path, monkeypatch):
+    """A deliberate PREDICT_ABSTAIN_EDGE=0.0 must not be coerced back to 0.10."""
+    client, _ = _client(
+        tmp_path,
+        monkeypatch,
+        PREDICT_ABSTAIN_EDGE=0.0,
+        jev=lambda settings: FakeJev(settings, p_true=0.53),
+    )
+    body = client.post("/predict", json=predict_body()).json()
+    # p_yes 0.53 vs mid 0.50 -> edge +0.03: a guess at threshold 0.0, an
+    # abstention at the 0.10 default (pinned by the companion test below).
+    assert body["abstain_threshold"] == 0.0
+    assert body["prediction"]["abstained"] is False
+    assert body["prediction"]["direction"] == "YES"
+
+
+def test_the_same_edge_abstains_at_the_default_threshold(tmp_path, monkeypatch):
+    """Companion to the test above: that edge really is below the default."""
+    client, _ = _client(
+        tmp_path, monkeypatch, jev=lambda settings: FakeJev(settings, p_true=0.53)
+    )
+    body = client.post("/predict", json=predict_body()).json()
+    assert body["abstain_threshold"] == 0.10
+    assert body["prediction"]["abstained"] is True
+
+
+def test_client_construction_failure_is_a_502_envelope(tmp_path, monkeypatch):
+    """A client that cannot even be built is an upstream error, not a 500."""
+
+    class Exploding:
+        def __init__(self, settings):
+            raise RuntimeError("no gamma today")
+
+    client, settings = _client(tmp_path, monkeypatch, gamma=Exploding)
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["code"] == "upstream_error"
+    assert detail["source"] == "gamma"
+    assert _audit(settings).predictions() == []  # fail closed: nothing logged
+
+
 # -------------------------------------------------------- GET /predict/accuracy
 def test_accuracy_is_derived_on_read(tmp_path, monkeypatch):
     client, settings = _client(tmp_path, monkeypatch)
@@ -212,6 +254,20 @@ def test_accuracy_empty_ledger_is_zeros(tmp_path, monkeypatch):
     assert body["n_logged"] == 0
     assert body["brier"] is None
     assert body["mock_split"]["live"] == {"n_logged": 0, "n_resolved": 0}
+
+
+def test_accuracy_limit_is_clamped(tmp_path, monkeypatch):
+    """``limit`` is a scan cap, not an unbounded page request."""
+    client, settings = _client(tmp_path, monkeypatch)
+    audit = _audit(settings)
+    audit.record("predict", _predict_payload("p1", 0.70, 0.60))
+    audit.record("predict", _predict_payload("p2", 0.30, 0.40))
+
+    assert client.get("/predict/accuracy?limit=1").json()["n_logged"] == 1
+    # 0 and negatives clamp up to 1; huge values clamp down to 5000
+    assert client.get("/predict/accuracy?limit=0").json()["n_logged"] == 1
+    assert client.get("/predict/accuracy?limit=-5").json()["n_logged"] == 1
+    assert client.get("/predict/accuracy?limit=999999").json()["n_logged"] == 2
 
 
 def test_accuracy_excludes_mock_unless_asked(tmp_path, monkeypatch):

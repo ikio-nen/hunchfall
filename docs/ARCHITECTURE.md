@@ -28,9 +28,10 @@ place real orders: there are no trading/signature endpoints and no keys in the c
                      +--------+---------+
                               |
                      +--------v---------+
-                     |     DATA API     |  /trades (tape, audited),
-                     |                  |  /v2/prices-history, /holders,
-                     |                  |  /oi — read-only market data
+                     |     DATA API     |  /v2/trades (tape, audited),
+                     |                  |  /v2/prices-history,
+                     |                  |  /v2/activity, /v2/positions
+                     |                  |  — read-only market data
                      +--------+---------+
                               |
                      +--------v---------+
@@ -110,7 +111,7 @@ The **kill switch** lives in two places:
 | Scraper | `app/scraper/` | Poll Reddit (optional, needs pre-approval) / RSS news (Google News + outlets, keyless) / GDELT for trending stories; emit `(story_text, keywords, source, ts)`. X excluded by design. No decisions, no prices. |
 | Gamma client | `app/polymarket/gamma.py` | Verified endpoints: `/events`, `/markets`, `/public-search` (primary story->market matcher), slugs, tags/series/sports. Keyset pagination (`next_cursor` -> `after_cursor`). Parses JSON-string `outcomePrices` + comma-separated `clobTokenIds`; guards the `["0","0"]` resolved-market gotcha. |
 | CLOB client | `app/polymarket/clob.py` | Verified market-data endpoints: `/price`, `/midpoint`, `/book` (min_order_size, tick_size, last_trade_price), `/spread`, `/prices-history`, `/tick-size`, batch `/books` `/prices` `/midpoints`. **No trading endpoints — `POST /order` is never called.** |
-| Data API client | `app/polymarket/data_api.py` | `/trades` (tape), `/v2/prices-history`, `/holders`, `/oi` — read-only market data. |
+| Data API client | `app/polymarket/data_api.py` | `/v2/trades` (tape, `condition=`), `/v2/prices-history`, `/v2/activity`, `/v2/positions` — read-only market data. **v1 (`/trades`, `/holders`, `/oi`) retired 2026-10-24 and was removed.** |
 | WebSocket feed | `app/polymarket/ws.py` | Optional upgrade: `wss://ws-subscriptions-clob.polymarket.com/ws/market`, subscribe `{"type":"market","assets_ids":[...]}`; events `book` / `price_change` / `last_trade_price`. `--watch` keeps REST polling by default. |
 | Jev client | `app/jev/client.py` | ONE typed call (`POST /v1/systemone`, Bearer auth, model pinned via `JEV_MODEL`): noul -> P(true), choice (YES/NO/SKIP + confidence, option order randomized per call), score (4-level legend -> weighted float). Text output is impossible by construction. `JEV_MOCK=true` for offline runs (outputs labeled MOCK). |
 | Policy gate | `app/policy/gate.py` | Pure deterministic rules: fee-adjusted edge threshold, quarter-Kelly sizing (capped 10%/market, 40% total, max 5 positions), spread/depth/skew/negrisk/UMA/confidence filters. Outputs TRADE (size) or VETO (reason). Every veto is logged. |
