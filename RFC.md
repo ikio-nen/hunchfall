@@ -437,13 +437,13 @@ No code diff exists yet, so this is an assessment of the plan and repo state, no
 | | |
 |---|---|
 | **RFC** | RFC-003 |
-| **Status** | APPROVED — Part B in progress |
+| **Status** | **DONE** — approved 2026-09-30; Part B implemented; merged via PR [#4](https://github.com/ikio-nen/hunchfall/pull/4) (rebase-merge `45f8091`), CI green |
 | **Depends on** | RFC-001 (merged: scan, wallets, proof surfaces) |
 | **Repo / branch** | `D:\hunchfall` @ `main` |
 | **Part A deliverable** | This section. **No implementation code in Part A.** |
 | **Part B (after approval)** | Additive implementation + tests + docs; PR against `main`; **stop without merging.** |
 
-> **APPROVED (2026-09-30):** Part B is in progress on `feat/rfc-003-market-guesser`. Everything below is the approved specification of what is being built; the plan text is kept as the record of what was agreed.
+> **DONE (2026-10-01):** Part B shipped and is merged into `main` (`45f8091`). Four additive prediction routes (`POST /predict`, `GET /predict/demo`, `GET /predict/accuracy`, `POST /predict/{prediction_id}/resolve`), the two prediction-only services (`app/predict.py`, `app/social.py`), and the Predict dashboard tab are live; every surface carries “paper prediction · no trade placed” and the mock path stays labelled (`model.mock`, `MOCK — not a real model`). Two live-checks still could not complete from the build network — all Polymarket hosts were unreachable — so the `/v2/trades` row keys and the `condition_id` → market resolution remain **runtime live-checks** (`docs/API_INVENTORY.md`). The plan text below is kept as the historical record of what was agreed.
 
 ---
 
