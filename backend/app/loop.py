@@ -267,8 +267,14 @@ def _pick_market(gamma: GammaClient, story: Story, audit: AuditLog) -> dict | No
 
 
 def _trade_ts(trade: dict) -> float | None:
-    """Best-effort unix timestamp from a trade dict."""
-    for key in ("timestamp", "ts", "time", "createdAt"):
+    """Best-effort unix timestamp from a Data API trade row.
+
+    Handles both row shapes: epoch seconds/millis under ``timestamp`` (v1 and
+    v2) and the ISO-8601 ``matchTime`` / ``match_time`` aliases. Only the
+    timestamp is read here — USD notional on v2 rows is ``size × price``
+    (those rows carry no ``usdc_size``).
+    """
+    for key in ("timestamp", "matchTime", "match_time", "ts", "time", "createdAt"):
         raw = trade.get(key)
         if raw is None:
             continue
@@ -300,8 +306,18 @@ def _snapshot(
     * mid / spread (cents) / top-of-book depth from the live order book
       touch; top-N bid/ask levels are kept for the execution book-walk,
     * ``price_ts`` = snapshot time (ISO-8601 UTC),
-    * ``last_trade_ts`` = latest Data API /trades timestamp (audited for
-      transparency; the gate vets news-vs-price skew, not trade staleness).
+    * ``last_trade_ts`` = latest Data API **v2** ``/v2/trades?condition=``
+      timestamp (audited for transparency; the gate vets news-vs-price skew,
+      not trade staleness). The tape is informational: a failure degrades to
+      an empty timestamp, never to a failed snapshot.
+
+    Args:
+        clob: CLOB market-data client.
+        data_api: Data API client (v2 only — v1 retired 2026-10-24).
+        market_id: The market's Gamma ``conditionId``; this is what v2's
+            ``condition`` filter takes (a token id is NOT accepted).
+        token_id: YES CLOB token id (used for the order book).
+        audit: Append-only audit log.
     """
     try:
         book = clob.get_orderbook(token_id) or {}
@@ -315,7 +331,7 @@ def _snapshot(
         spread_cents = (best_ask_p - best_bid_p) * 100.0
         top_depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s
         try:
-            trades = data_api.get_trades(token_id=token_id, limit=5) or []
+            trades = data_api.get_trades_v2(condition=market_id, limit=5) or []
         except Exception:  # noqa: BLE001 - tape is informational here
             trades = []
         latest: float | None = None

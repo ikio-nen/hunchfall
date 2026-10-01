@@ -579,8 +579,14 @@ def create_app(settings) -> FastAPI:
 
     @app.get("/predict/accuracy")
     def predict_accuracy(include_mock: bool = False, limit: int = 500) -> dict:
-        """Derived-on-read calibration ledger (mock excluded by default)."""
-        return predict_service.accuracy(include_mock=include_mock, limit=limit)
+        """Derived-on-read calibration ledger (mock excluded by default).
+
+        ``limit`` is clamped: it is a scan cap, not a way to ask the audit
+        log for an unbounded page.
+        """
+        return predict_service.accuracy(
+            include_mock=include_mock, limit=max(1, min(int(limit), 5000))
+        )
 
     @app.post("/predict/{prediction_id}/resolve")
     def predict_resolve(prediction_id: str, req: ResolveRequest) -> dict:

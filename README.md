@@ -127,7 +127,7 @@ Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 | `POLYMARKET_GAMMA_URL` | `https://gamma-api.polymarket.com` | Gamma Data API base URL |
 | `POLYMARKET_CLOB_URL` | `https://clob.polymarket.com` | CLOB market-data base URL (no trading endpoints) |
 | `POLYMARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | CLOB websocket (optional `--watch` upgrade) |
-| `POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | Data API base URL (trades/history/holders/OI) |
+| `POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | Data API **v2** base URL (trades/history/activity/positions; v1 retired) |
 | `GDELT_DOC_URL` | `https://api.gdeltproject.org/api/v2/doc/doc` | GDELT 2.1 DOC API base (keyless) |
 | `JEV_API_URL` | `https://api.typesafe.ai` | TypeSafe Jev base (live call is `POST /v1/systemone`) |
 | `JEV_API_KEY` | — | Jev API key (secret) |

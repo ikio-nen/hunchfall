@@ -2,22 +2,22 @@
 
 Base: https://data-api.polymarket.com (``POLYMARKET_DATA_API_URL``).
 
-VERIFIED endpoints::
+VERIFIED endpoints (Data API v2 only — the v1 routes ``/trades`` /
+``/holders`` / ``/oi`` retired 2026-10-24 and no longer exist here)::
 
-    GET /trades             (rate limit: 200 req / 10s)
     GET /v2/prices-history  (rate limit: 200 req / 10s)
-    GET /holders
-    GET /oi
+    GET /v2/activity
+    GET /v2/positions
+    GET /v2/trades
 
-Used for the trade tape (feed-freshness staleness), price history,
-holder counts, and open interest per market — all market-data inputs to
+Used for the trade tape (feed-freshness staleness), price history, wallet
+activity, positions, and per-market trade tapes — all market-data inputs to
 the snapshot/gate. No trading endpoints here (paper only).
 
-Additive v2 methods (``get_activity_v2`` / ``get_positions_v2`` /
-``get_trades_v2``) follow the verified Data API v2 contract:
+Every method speaks the verified Data API v2 contract:
 ``{"data", "pagination"}`` envelope, NO ``offset`` param, cursor
-pagination, 429 + ``Retry-After`` retries, and an empty ``data`` array as a
-valid zero-state. v1 retires 2026-10-24.
+pagination, 429/503 + ``Retry-After`` retries, and an empty ``data`` array as a
+valid zero-state.
 
 ``get_trades_v2`` (``/v2/trades?condition=``) is the RFC-003 predictor tape:
 per-trade price/size/side/timestamp with **USD notional = ``size × price``**
@@ -43,7 +43,7 @@ class DataApiError(RuntimeError):
 
 
 def _retry_after_seconds(raw: str | None) -> float:
-    """Parse a 429 ``Retry-After`` header; default 1s when unreadable.
+    """Parse a 429/503 ``Retry-After`` header; default 1s when unreadable.
 
     Args:
         raw: Header value (seconds or an HTTP date).
@@ -98,7 +98,7 @@ class DataApiClient:
         """GET a v2 route and unwrap the ``{data, pagination}`` envelope.
 
         Never sends ``offset`` (v2 rejects it) and honors ``Retry-After``
-        on 429 up to two retries (sleep capped at 5s).
+        on 429/503 up to two retries (sleep capped at 5s).
 
         Args:
             path: v2 path, e.g. "/v2/activity".
@@ -117,10 +117,14 @@ class DataApiClient:
             if key != "offset" and value is not None
         }
         last_exc: Exception | None = None
+        last_status: int | None = None
         for attempt in range(3):
             try:
                 resp = self._http.get(path, params=clean)
-                if resp.status_code == 429:
+                # 503 = transient upstream overload: retry it exactly like a
+                # rate limit, honoring Retry-After when the API sends one.
+                if resp.status_code in (429, 503):
+                    last_status = resp.status_code
                     if attempt >= 2:
                         break
                     retry_after = _retry_after_seconds(resp.headers.get("Retry-After"))
@@ -136,7 +140,10 @@ class DataApiClient:
             except httpx.HTTPError as exc:
                 last_exc = exc
                 break
-        raise DataApiError(f"Data API v2 request failed [{endpoint}]: {last_exc}")
+        detail = (
+            last_exc if last_exc is not None else f"HTTP {last_status} after retries"
+        )
+        raise DataApiError(f"Data API v2 request failed [{endpoint}]: {detail}")
 
     def get_activity_v2(
         self,
@@ -238,32 +245,6 @@ class DataApiClient:
         data, _ = self._get_v2("/v2/trades", params)
         return data
 
-    def get_trades(
-        self,
-        token_id: str | None = None,
-        market_id: str | None = None,
-        limit: int = 50,
-    ) -> list[dict]:
-        """Recent trades for a token/market.
-
-        GET /trades — 200/10s.
-
-        Args:
-            token_id: CLOB token id (optional).
-            market_id: Market id (optional).
-            limit: Max trades.
-
-        Returns:
-            List of trade dicts (price, size, side, timestamp per API).
-        """
-        params: dict = {"limit": limit}
-        if token_id:
-            params["token_id"] = token_id
-        if market_id:
-            params["market_id"] = market_id
-        payload = self._get("/trades", params=params)
-        return payload if isinstance(payload, list) else payload.get("data", [])
-
     def get_prices_history_v2(
         self,
         token_id: str,
@@ -296,30 +277,6 @@ class DataApiClient:
                     return payload[key]
             return []
         return payload if isinstance(payload, list) else []
-
-    def get_holders(self, market_id: str) -> list[dict]:
-        """Holder distribution for a market. GET /holders.
-
-        Args:
-            market_id: Market id.
-
-        Returns:
-            List of holder dicts.
-        """
-        payload = self._get("/holders", params={"market_id": market_id})
-        return payload if isinstance(payload, list) else payload.get("data", [])
-
-    def get_oi(self, market_id: str) -> dict:
-        """Open interest for a market. GET /oi.
-
-        Args:
-            market_id: Market id.
-
-        Returns:
-            OI dict from the API.
-        """
-        payload = self._get("/oi", params={"market_id": market_id})
-        return payload if isinstance(payload, dict) else {}
 
     def close(self) -> None:
         """Close the underlying httpx client."""

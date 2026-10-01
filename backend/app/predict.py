@@ -36,7 +36,7 @@ import hashlib
 import json
 import statistics
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from app.config import Settings
@@ -373,6 +373,8 @@ def build_snapshot_text(
             f"{social.get('posts_window', 0)} posts · "
             f"{social.get('engagement_window', 0)} engagements"
             + (f" · velocity {social['velocity']}x" if "velocity" in social else "")
+            + " [network-wide (unfiltered) — the Jetstream tail is not "
+            "keyword-filtered, so these are network counts, not subject counts]"
         )
         item = social.get("top_item")
         if isinstance(item, dict) and item.get("text"):
@@ -456,7 +458,8 @@ def build_reasons(
         reasons.append(
             f"social pulse: {social.get('posts_window', 0)} posts / "
             f"{social.get('engagement_window', 0)} engagements on "
-            f"{' + '.join(social['platforms_ok'])} ({kind})"
+            f"{' + '.join(social['platforms_ok'])} ({kind}) — network-wide "
+            f"(unfiltered), not subject-filtered"
         )
     if "market_mid" in features:
         reasons.append(f"base_rate anchor: market-implied {features['market_mid']}")
@@ -628,7 +631,7 @@ def accuracy_report(
             "live": {"n_logged": live_logged, "n_resolved": live_resolved},
             "mock": {"n_logged": mock_logged, "n_resolved": mock_resolved},
         },
-        "label": "paper predictions only · no trade placed",
+        "label": PAPER_LABEL,
     }
 
 
@@ -879,6 +882,43 @@ class PredictService:
             "note": MOCK_NOTE if mock else "",
         }
 
+    def _threshold(self) -> float:
+        """``PREDICT_ABSTAIN_EDGE`` — read without ``or`` so 0.0 survives.
+
+        A deliberate ``0.0`` means "never abstain"; coercing it back to the
+        default would silently override the operator. Same None-check pattern
+        as ``SOCIAL_DEADLINE_SEC`` in ``app/social.py``.
+
+        Returns:
+            The abstention threshold (0.10 when the setting is unset).
+        """
+        raw = getattr(self.settings, "PREDICT_ABSTAIN_EDGE", 0.10)
+        return 0.10 if raw is None else float(raw)
+
+    def _make_client(self, factory: Callable[[Settings], Any], source: str) -> Any:
+        """Construct an upstream client, mapping failures to a 502 envelope.
+
+        Nothing is persisted before the ``predict`` event, so a constructor
+        failure is already fail-closed; this only keeps the error envelope
+        uniform instead of leaking an unhandled 500.
+
+        Args:
+            factory: A client class taking ``Settings``.
+            source: Envelope source name (gamma | clob | data-api | jev).
+
+        Returns:
+            The constructed client.
+
+        Raises:
+            PredictUpstreamError: the client could not be constructed.
+        """
+        try:
+            return factory(self.settings)
+        except Exception as exc:  # noqa: BLE001 - uniform 502 envelope
+            raise PredictUpstreamError(
+                f"{source} client unavailable: {exc}", source=source
+            ) from exc
+
     # ---- main entry --------------------------------------------------------
     def run(self, req: dict[str, Any]) -> dict:
         """Execute one prediction and persist a ``predict`` event.
@@ -897,15 +937,15 @@ class PredictService:
 
         gamma = clob = data_api = jev = None
         try:
-            gamma = GammaClient(self.settings)
+            gamma = self._make_client(GammaClient, "gamma")
             resolved = self.resolve_market(
                 gamma, market_slug=market_slug, condition_id=condition_id
             )
             market = resolved["market"]
             question = str(market.get("question") or resolved["slug"])
 
-            clob = ClobClient(self.settings)
-            data_api = DataApiClient(self.settings)
+            clob = self._make_client(ClobClient, "clob")
+            data_api = self._make_client(DataApiClient, "data-api")
             features, missing = self.build_features(
                 market, resolved["condition_id"], clob=clob, data_api=data_api
             )
@@ -914,7 +954,7 @@ class PredictService:
             snapshot_text = build_snapshot_text(
                 question, features["market_mid"], features, missing
             )
-            jev = JevClient(self.settings)
+            jev = self._make_client(JevClient, "jev")
             ensemble = self._ensemble(
                 jev,
                 DecisionState(
@@ -927,7 +967,7 @@ class PredictService:
                     extra_context=snapshot_text,
                 ),
             )
-            threshold = float(getattr(self.settings, "PREDICT_ABSTAIN_EDGE", 0.10) or 0.10)
+            threshold = self._threshold()
             decision = decide(
                 ensemble["p_yes"],
                 features["market_mid"],
@@ -1086,7 +1126,7 @@ class PredictService:
                     ),
                 ),
             )
-            threshold = float(getattr(self.settings, "PREDICT_ABSTAIN_EDGE", 0.10) or 0.10)
+            threshold = self._threshold()
             decision = decide(
                 ensemble["p_yes"],
                 features["market_mid"],

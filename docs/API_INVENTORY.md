@@ -46,10 +46,16 @@ General CLOB limit: 9000 req / 10s.
 
 | Endpoint | Method | Auth? | Rate limit | Used for | Status |
 |---|---|---|---|---|---|
-| `/trades` | GET | No (public) | 200 req / 10s | legacy trade tape (loop only; v1 retires 2026-10-24) | verified |
 | `/v2/prices-history` | GET | No (public) | 200 req / 10s | price history v2 | verified |
-| `/holders` | GET | No (public) | (general) | holder distribution per market | verified |
-| `/oi` | GET | No (public) | (general) | open interest per market | verified |
+| `/v2/activity` | GET | No (public) | (general) | extension-scan trade tape (`type=TRADE`) + wallet activity feed (`user`) | verified |
+| `/v2/positions` | GET | No (public) | (general) | watch-only wallet open positions | verified |
+| `/v2/trades` | GET | No (public) | (general) | RFC-003 predictor tape; USD = `size × price` | verified |
+
+**v1 is retired and removed from the client (2026-10-24):** `GET /trades`,
+`/holders`, and `/oi` no longer exist in `app/polymarket/data_api.py` — no dead
+v1 surface ships. The loop's snapshot tape read moved from
+`get_trades(token_id=…)` to `get_trades_v2(condition=<conditionId>)`, and
+`get_holders` / `get_oi` were deleted (they had no callers).
 
 ### Data API v2 — verified params (2026-09-30, official openapi.json)
 

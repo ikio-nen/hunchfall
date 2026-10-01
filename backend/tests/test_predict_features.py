@@ -121,6 +121,32 @@ def test_reasons_always_nonempty_and_typed_on_abstention():
     assert any("missing feature source: tape" in reason for reason in reasons)
 
 
+def test_social_counts_are_labelled_network_wide_and_unfiltered():
+    """The Jetstream tail is unfiltered, so the counts must say so.
+
+    Regression guard for the honesty-of-display fix: the public tail counts
+    every Bluesky post in the window, not the market's subject, so no surface
+    may present them as the subject's own social pulse.
+    """
+    features = {
+        "market_mid": 0.55,
+        "imbalance": 0.1474,
+        "social": {
+            "relevance": "direct",
+            "proxy": False,
+            "platforms_ok": ["bluesky"],
+            "posts_window": 41,
+            "engagement_window": 12,
+        },
+    }
+    decision = decide(0.67, 0.55, 0.10, 0.0)
+    reasons = build_reasons(features, decision, [], 0.10)
+    assert any("network-wide (unfiltered)" in reason for reason in reasons)
+    assert "network-wide (unfiltered)" in build_snapshot_text(
+        "Will it rain tomorrow?", 0.55, features, []
+    )
+
+
 def test_snapshot_text_is_bounded_and_mentions_the_base_rate():
     text = build_snapshot_text(
         "Will it rain tomorrow?", 0.55, {"market_mid": 0.55, "imbalance": 0.1}, []
