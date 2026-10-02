@@ -44,7 +44,7 @@ from app.jev.client import DecisionState, JevClient
 from app.memory.audit import AuditLog
 from app.paths import utcnow_iso
 from app.polymarket.clob import ClobClient, book_levels
-from app.polymarket.data_api import DataApiClient, DataApiError
+from app.polymarket.data_api import DataApiClient, DataApiError, top10_holder_share
 from app.polymarket.gamma import (
     GammaClient,
     GammaError,
@@ -476,7 +476,8 @@ def build_snapshot_text(
     Args:
         question: Market question.
         market_mid: CLOB midpoint (the market-implied base rate).
-        features: Book/tape/price-history/social features.
+        features: Book/tape/price-history/social features (incl. OI and
+            holder concentration when present).
         missing: Names of unavailable feature sources.
 
     Returns:
@@ -529,6 +530,13 @@ def build_snapshot_text(
             bits.append(f"realized_vol {history['realized_vol']:.4f}")
         if bits:
             lines.append("Price history: " + " · ".join(bits))
+    if features.get("oi") is not None:
+        lines.append(f"Open interest: ${_usd(features['oi'])}")
+    if features.get("holders") is not None:
+        lines.append(
+            "Holder concentration: top-10 holders hold "
+            f"{features['holders'] * 100:.1f}% of the listed token amounts"
+        )
     if "hours_to_resolution" in features:
         line = f"Resolution in {features['hours_to_resolution']}h"
         if "volume24hr_usd" in features:
@@ -1079,6 +1087,33 @@ class PredictService:
         hours = hours_to_resolution(market)
         if hours is not None:
             features["hours_to_resolution"] = _round(hours, 4)
+
+        # Open interest + holder concentration (Data API v2, live-checked
+        # 2026-10-03). Both are features: unavailable or unparseable -> the
+        # name lands in ``missing`` and the prediction continues unchanged —
+        # never fatal, never guessed.
+        try:
+            oi = data_api.get_oi(condition_id)
+            if oi is None:
+                missing.append("oi")
+            else:
+                features["oi"] = oi
+        except Exception as exc:  # noqa: BLE001 - a feature source, never fatal
+            self.audit.record(
+                "stage_error", {"stage": "data-api.oi", "error": str(exc)}
+            )
+            missing.append("oi")
+        try:
+            share = top10_holder_share(data_api.get_holders(condition_id))
+            if share is None:
+                missing.append("holders")
+            else:
+                features["holders"] = share
+        except Exception as exc:  # noqa: BLE001 - a feature source, never fatal
+            self.audit.record(
+                "stage_error", {"stage": "data-api.holders", "error": str(exc)}
+            )
+            missing.append("holders")
 
         social = self.social.analyze(market)
         features["social"] = social

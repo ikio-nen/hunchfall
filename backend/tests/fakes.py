@@ -351,21 +351,78 @@ def mixed_trade_v2_items() -> list[dict]:
     return trade_v2_items() + no_rows
 
 
+def holder_groups() -> list[dict]:
+    """Real ``/v2/holders`` shape (live-checked 2026-10-03), hand-computable.
+
+    Eleven holders across the two outcome sides: one 100-share holder plus ten
+    10-share holders (five on the YES token, five on the NO token). Total
+    listed = 100 + 10*10 = 200; the top ten sum to 100 + 9*10 = 190, so
+    ``data_api.top10_holder_share(holder_groups())`` == 0.95 exactly.
+    """
+
+    def _holder(idx: int, amount: float, outcome_index: int) -> dict:
+        return {
+            "proxy_wallet": "0x" + f"{idx:040x}",
+            "token_id": "111" if outcome_index == 0 else "222",
+            "outcome_index": outcome_index,
+            "amount": amount,
+            "name": "",
+            "pseudonym": f"holder-{idx}",
+        }
+
+    return [
+        {
+            "token_id": "111",
+            "holders": [
+                _holder(0, 100.0, 0),
+                _holder(1, 10.0, 0),
+                _holder(2, 10.0, 0),
+                _holder(3, 10.0, 0),
+                _holder(4, 10.0, 0),
+                _holder(5, 10.0, 0),
+            ],
+        },
+        {
+            "token_id": "222",
+            "holders": [
+                _holder(6, 10.0, 1),
+                _holder(7, 10.0, 1),
+                _holder(8, 10.0, 1),
+                _holder(9, 10.0, 1),
+                _holder(10, 10.0, 1),
+            ],
+        },
+    ]
+
+
 class FakeTradesApi:
-    """Data API stub serving the ``/v2/trades`` predictor tape."""
+    """Data API stub: ``/v2/trades`` tape + v2 OI/holders features."""
 
     def __init__(
         self,
         settings: Settings,
         items: list[dict] | None = None,
         fail: bool = False,
+        oi: float | None = 88_500.0,
+        holders: list[dict] | None = None,
+        fail_oi: bool = False,
+        fail_holders: bool = False,
     ) -> None:
         self.settings = settings
         # Default to the REAL mixed feed, so the API paths exercise the
         # YES-token scoping instead of a fixture that hides the bug.
         self.items = items if items is not None else mixed_trade_v2_items()
         self.fail = fail
+        # A real interactive market has both; present-value defaults let the
+        # happy paths exercise the features (pass oi=None / holders=[] for
+        # the no-data case). ``fail=True`` keeps its old tape-only meaning.
+        self.oi = oi
+        self.holders = holders if holders is not None else holder_groups()
+        self.fail_oi = fail_oi
+        self.fail_holders = fail_holders
         self.calls: list[dict] = []
+        self.oi_calls: list[dict] = []
+        self.holders_calls: list[dict] = []
 
     def get_trades_v2(
         self, condition: str, limit: int = 100, cursor=None, **kwargs: Any
@@ -395,6 +452,20 @@ class FakeTradesApi:
             if key in allowed:
                 out[key].append(dict(item))
         return out
+
+    def get_oi(self, condition: str) -> float | None:
+        """v2 open interest; ``oi=None`` mirrors the API reporting none."""
+        self.oi_calls.append({"condition": condition})
+        if self.fail_oi:
+            raise DataApiError("data-api oi down")
+        return self.oi
+
+    def get_holders(self, condition: str) -> list[dict]:
+        """v2 holder groups (empty list = the honest zero-state)."""
+        self.holders_calls.append({"condition": condition})
+        if self.fail_holders:
+            raise DataApiError("data-api holders down")
+        return [dict(group) for group in self.holders]
 
     def close(self) -> None:
         pass

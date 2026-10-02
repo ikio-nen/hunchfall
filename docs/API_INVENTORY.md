@@ -84,12 +84,25 @@ CLOB gotchas (live-checked 2026-10-02):
 | `/v2/activity` | GET | No (public) | (general) | extension-scan trade tape (`type=TRADE`) + wallet activity feed (`user`) | verified |
 | `/v2/positions` | GET | No (public) | (general) | watch-only wallet open positions | verified |
 | `/v2/trades` | GET | No (public) | (general) | RFC-003 predictor tape; USD = `size × price` | verified |
+| `/v2/oi` | GET | No (public) | (general) | RFC-003 open-interest feature | live-checked 2026-10-03 |
+| `/v2/holders` | GET | No (public) | (general) | RFC-003 holder-concentration feature | live-checked 2026-10-03 |
 
 **v1 is retired and removed from the client (2026-10-24):** `GET /trades`,
 `/holders`, and `/oi` no longer exist in `app/polymarket/data_api.py` — no dead
 v1 surface ships. The loop's snapshot tape read moved from
-`get_trades(token_id=…)` to `get_trades_v2(condition=<conditionId>)`, and
-`get_holders` / `get_oi` were deleted (they had no callers).
+`get_trades(token_id=…)` to `get_trades_v2(condition=<conditionId>)`, and the
+old v1 `get_holders` / `get_oi` (which had no callers) were deleted.
+
+**The v2 OI/holder routes do exist** (live-checked 2026-10-03 through the shim):
+`GET /v2/oi?condition=<id>` → `{"data": [{"condition_id", "value"}]}` and
+`GET /v2/holders?condition=<id>` → `{"data": [{"token_id", "holders":
+[{amount, outcome_index, …}]}], "pagination"}` with holders ranked by `amount`
+(≤100 per outcome side). Both reject `market`/`market_id` with a typed
+`invalid_request` (the filter is `condition`), and both are wrapped in the
+standard v2 envelope. `get_oi` / `get_holders` (v2 only) now serve the
+predictor + loop features; the concentration number is defined in
+`data_api.top10_holder_share` (top ten listed holder amounts over all listed
+amounts, per page — the docstring names the page-tail caveat).
 
 ### Data API v2 — verified params (2026-09-30, official openapi.json)
 
@@ -102,6 +115,8 @@ camelCase; `429` carries `Retry-After`; a documented miss returns an empty
 |---|---|---|---|
 | `/v2/activity` | `user` (required, EVM address); `type` (comma-separated, e.g. `TRADE`; `TIP` opt-in only); `condition` (≤20 ids; aliases `condition_id`/`conditionId`); `event_id` (≤20, mutually exclusive with `condition`); `side`; `start`/`end` (epoch s); `limit` (default 100, max 1000); `cursor`; `sort_direction`; `exclude_deposits_withdrawals` (default true) | extension-scan trade tape (`type=TRADE&condition=`) + wallet activity feed (`user`) | verified |
 | `/v2/positions` | `user`; `status` (`OPEN`/`CLOSED`); `limit`; `cursor` | watch-only wallet open positions | verified |
+| `/v2/oi` | `condition` (aliases `condition_id`/`conditionId`); one row `{condition_id, value}` | RFC-003 OI feature (predictor + loop) | live-checked 2026-10-03 |
+| `/v2/holders` | `condition` (same aliases); one group per outcome token, holders ranked by `amount` (≤100/side) | RFC-003 holder-concentration feature (predictor + loop) | live-checked 2026-10-03 |
 
 Note: `/v2/activity?type=TRADE` stays the RFC-001 extension-scan tape; the
 RFC-003 predictor uses `/v2/trades` (below). A non-proxy-wallet `user`
@@ -188,7 +203,7 @@ leave them on the real hosts and let the fallback find the shim.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/predict` | POST | `{market_slug \| condition_id}` → Gamma resolve → CLOB book → `/v2/trades` tape → social pulse (social-outcome markets only) → Jev ensemble → typed P(YES) prediction or an honest abstention. Never places a fill. |
+| `/predict` | POST | `{market_slug \| condition_id}` → Gamma resolve → CLOB book → `/v2/trades` tape → `/v2/oi` + `/v2/holders` features → social pulse (social-outcome markets only) → Jev ensemble → typed P(YES) prediction or an honest abstention. Never places a fill. |
 | `/predict/demo` | GET | Runs the pinned demo market through the full pipeline; falls back to a committed canned snapshot. Always 200; **never persists**. |
 | `/predict/accuracy` | GET | Derived-on-read calibration ledger: Brier (model vs market vs always-0.5), Brier skill, direction accuracy, abstention rate, mock/live split. |
 | `/predict/{prediction_id}/resolve` | POST | Records the realised `YES \| NO` outcome for one logged prediction (append-only; manual settlement). |

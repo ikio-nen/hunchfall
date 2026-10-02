@@ -9,10 +9,17 @@ VERIFIED endpoints (Data API v2 only — the v1 routes ``/trades`` /
     GET /v2/activity
     GET /v2/positions
     GET /v2/trades
+    GET /v2/oi              (live-checked 2026-10-03)
+    GET /v2/holders         (live-checked 2026-10-03)
 
 Used for the trade tape (feed-freshness staleness), price history, wallet
-activity, positions, and per-market trade tapes — all market-data inputs to
-the snapshot/gate. No trading endpoints here (paper only).
+activity, positions, per-market trade tapes, open interest, and holder
+distribution — all market-data inputs to the snapshot/gate. No trading
+endpoints here (paper only).
+
+``get_oi`` / ``get_holders`` read the v2 open-interest and holder-distribution
+routes; ``top10_holder_share`` turns the holder groups into the RFC-003
+holder-concentration feature (exact definition in its docstring).
 
 Every method speaks the verified Data API v2 contract:
 ``{"data", "pagination"}`` envelope, NO ``offset`` param, cursor
@@ -116,6 +123,54 @@ def _retry_after_seconds(raw: str | None) -> float:
         return max(0.0, float(raw))
     except (TypeError, ValueError):
         return 1.0
+
+
+def top10_holder_share(groups: object) -> float | None:
+    """Top-10 holder share across every outcome-token side of one market.
+
+    Exact definition (live-checked 2026-10-03 against
+    ``GET /v2/holders?condition=<condition_id>``): collect every holder
+    ``amount`` from every returned outcome group, sort descending, and divide
+    the sum of the ten largest by the sum of **all** listed amounts. The
+    result is a fraction in [0, 1]; 1.0 means the ten biggest listed holders
+    are the entire listed book (a market with fewer than ten holders also
+    returns 1.0 by definition).
+
+    The denominator is what the API returned in this page (up to 100 holders
+    per side): for a market whose tail is longer than the page, the true
+    share is lower and this number is an upper bound — named here, never
+    hidden.
+
+    Args:
+        groups: The ``data`` list from ``/v2/holders``: one dict per outcome
+            token, each with a ``holders`` list of ``{"amount": ...}`` rows.
+
+    Returns:
+        The share as a float, or None when no usable holder amount exists
+        (empty or malformed payload — the caller reports the feature missing,
+        never a guessed zero).
+    """
+    amounts: list[float] = []
+    for group in groups if isinstance(groups, list) else []:
+        if not isinstance(group, dict):
+            continue
+        holders = group.get("holders")
+        for holder in holders if isinstance(holders, list) else []:
+            if not isinstance(holder, dict):
+                continue
+            try:
+                amount = float(holder.get("amount"))
+            except (TypeError, ValueError):
+                continue
+            if amount > 0:
+                amounts.append(amount)
+    if not amounts:
+        return None
+    amounts.sort(reverse=True)
+    total = sum(amounts)
+    if total <= 0:
+        return None
+    return sum(amounts[:10]) / total
 
 
 def _unwrap_v2(payload: object) -> tuple[list, dict]:
@@ -425,6 +480,63 @@ class DataApiClient:
                         key,
                     )
         return out
+
+    def get_oi(self, condition_id: str) -> float | None:
+        """Open interest for one market, or None when unreported.
+
+        GET /v2/oi?condition=<condition_id> (live-checked 2026-10-03)::
+
+            {"data": [{"condition_id": "0x…", "value": 117919.344026}]}
+
+        The upstream ``value`` is returned unchanged — never rescaled, never
+        guessed. An empty ``data`` array (unknown condition, or a market the
+        API tracks no OI for) and a non-numeric ``value`` both return None;
+        the caller records the feature as missing instead of inventing 0.
+
+        Args:
+            condition_id: Market condition id (the v2 ``condition`` filter).
+
+        Returns:
+            Open interest, or None when the API reports none/unparseable.
+
+        Raises:
+            DataApiError: on HTTP failure after the v2 retries.
+        """
+        data, _ = self._get_v2("/v2/oi", {"condition": condition_id})
+        for row in data or []:
+            if isinstance(row, dict):
+                try:
+                    return float(row.get("value"))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def get_holders(self, condition_id: str) -> list[dict]:
+        """Holder groups for one market, one entry per outcome token.
+
+        GET /v2/holders?condition=<condition_id> (live-checked 2026-10-03)::
+
+            {"data": [{"token_id": "…",
+                        "holders": [{"amount": 39999.98,
+                                     "outcome_index": 0, …}, …]}, …],
+             "pagination": {"limit": 100, …}}
+
+        Holders arrive sorted by amount descending (up to 100 per side).
+        Groups are returned unchanged; use ``top10_holder_share`` for the
+        concentration feature. An empty ``data`` array is a valid zero-state
+        (no listed holders), not an error.
+
+        Args:
+            condition_id: Market condition id (the v2 ``condition`` filter).
+
+        Returns:
+            List of ``{"token_id", "holders"}`` group dicts.
+
+        Raises:
+            DataApiError: on HTTP failure after the v2 retries.
+        """
+        data, _ = self._get_v2("/v2/holders", {"condition": condition_id})
+        return [row for row in data or [] if isinstance(row, dict)]
 
     def get_prices_history_v2(
         self,
