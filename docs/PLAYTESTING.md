@@ -129,6 +129,14 @@ guessed**.
 hand-written `SAMPLE` rows. The real rows are sports-heavy (soccer, tennis,
 basketball, baseball) because `order=volume` on closed markets surfaces them.
 
+> **2026-10-03 — the set grew to 50 REAL markets.** The same builder (run
+> through the read-only fetch proxy, since this network blocks direct
+> Polymarket egress) added 30 markets under the same confirm-or-skip rules;
+> rows are only appended — no existing row changed. Composition is now
+> 15 YES / 35 NO (base rate 0.300), still sports-heavy for the same
+> `order=volume` reason. The measured results below are Round 1 numbers (the
+> first 20) and were **not** re-measured against the 50-market set.
+
 ### 7.1 The model column is MOCK, and it loses
 
 The only decide_fn available offline is `mock_decide`, which derives P(true)
