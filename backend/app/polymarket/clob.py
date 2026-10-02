@@ -44,6 +44,53 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 class ClobError(RuntimeError):
     """Raised when a CLOB request fails; names the endpoint."""
 
+    def __init__(
+        self, message: str, *, trace_id: str = "", retryable: bool | None = None
+    ) -> None:
+        """Store the upstream trace id (and retryability) with the message.
+
+        Args:
+            message: Human-readable failure, naming the endpoint.
+            trace_id: Opaque upstream trace id (empty when unavailable).
+            retryable: Upstream ``retryable`` flag, or None when unknown.
+        """
+        super().__init__(message)
+        self.trace_id = trace_id
+        self.retryable = retryable
+
+
+def _error_body(resp: object) -> dict:
+    """Best-effort parse of a CLOB error body (``{error, code, ...}``).
+
+    Args:
+        resp: An httpx-like response.
+
+    Returns:
+        The error dict, or ``{}`` when the body is not a JSON object.
+    """
+    try:
+        payload = resp.json()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - non-JSON error bodies are fine
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _error_trace(resp: object, body: dict) -> tuple[str, bool | None]:
+    """Extract ``(trace_id, retryable)`` from a CLOB error response.
+
+    Args:
+        resp: An httpx-like response.
+        body: Parsed error body.
+
+    Returns:
+        ``(trace_id, retryable)``; both may be empty/None.
+    """
+    headers = getattr(resp, "headers", {}) or {}
+    trace_id = str(body.get("trace_id") or headers.get("x-trace-id") or "")
+    raw = body.get("retryable")
+    retryable = bool(raw) if isinstance(raw, bool) else None
+    return trace_id, retryable
+
 
 def parse_level(level: Any) -> tuple[float, float] | None:
     """Normalize one CLOB book level into ``(price, size)`` floats.
@@ -120,6 +167,12 @@ class ClobClient:
     def _get(self, path: str, params: dict | None = None) -> dict | list:
         """GET with exponential backoff on 429/5xx (max 4 retries).
 
+        A ``429``/``503`` is only retried when the error body says
+        ``retryable: true`` — or when the body carries no flag at all, which
+        keeps the pre-existing status-based behavior. A non-retryable failure
+        is raised immediately with the upstream ``trace_id`` attached for
+        operator correlation (the CLOB error schema documents ``trace_id``).
+
         Args:
             path: Path under the CLOB base URL.
             params: Query params.
@@ -129,10 +182,22 @@ class ClobClient:
         """
         endpoint = f"{self.settings.POLYMARKET_CLOB_URL}{path}"
         last_exc: Exception | None = None
+        last_trace = ""
         for attempt in range(_MAX_RETRIES + 1):
             try:
                 resp = self._http.get(path, params=params)
                 if resp.status_code in _RETRYABLE_STATUS:
+                    body = _error_body(resp)
+                    trace_id, retryable = _error_trace(resp, body)
+                    last_trace = trace_id or last_trace
+                    if retryable is False:
+                        message = (
+                            f"CLOB API request failed [{endpoint}]: "
+                            f"HTTP {resp.status_code} {body.get('error') or ''}".strip()
+                        )
+                        if trace_id:
+                            message = f"{message} (trace_id={trace_id})"
+                        raise ClobError(message, trace_id=trace_id, retryable=False)
                     raise httpx.HTTPStatusError(
                         f"retryable status {resp.status_code}",
                         request=resp.request,
@@ -140,6 +205,8 @@ class ClobClient:
                     )
                 resp.raise_for_status()
                 return resp.json()
+            except ClobError:
+                raise
             except httpx.HTTPError as exc:
                 last_exc = exc
                 if attempt == _MAX_RETRIES:
@@ -154,7 +221,10 @@ class ClobClient:
                     backoff,
                 )
                 time.sleep(backoff)
-        raise ClobError(f"CLOB API request failed [{endpoint}]: {last_exc}")
+        message = f"CLOB API request failed [{endpoint}]: {last_exc}"
+        if last_trace:
+            message = f"{message} (trace_id={last_trace})"
+        raise ClobError(message, trace_id=last_trace)
 
     # ---- verified single-token market-data endpoints ----------------------
     def get_price(self, token_id: str, side: str = "BUY") -> float:
@@ -169,31 +239,154 @@ class ClobClient:
 
         Returns:
             Price in 0..1.
+
+        Raises:
+            ClobError: when the payload carries no usable price.
         """
         payload = self._get("/price", params={"token_id": token_id, "side": side})
         if isinstance(payload, dict):
             for key in ("price", "data"):
                 if key in payload:
                     value = payload[key]
-                    return float(value if not isinstance(value, dict) else value.get("price", 0.0))
+                    if isinstance(value, dict):
+                        value = value.get("price")
+                    if value is None:
+                        continue
+                    return float(value)
+            raise ClobError(
+                f"CLOB /price returned no price for token {token_id}: {payload!r}"
+            )
         return float(payload)
 
     def get_midpoint(self, token_id: str) -> float:
         """Mid price of best bid/ask. GET /midpoint?token_id=X — 1500/10s.
+
+        Live-checked 2026-10-02: the payload is ``{"mid": "0.0255"}`` — the
+        key is ``mid``, not ``midpoint``, so the old parser hit ``float(None)``
+        and raised ``TypeError`` on every real call.
 
         Args:
             token_id: CLOB token id.
 
         Returns:
             Mid price in 0..1.
+
+        Raises:
+            ClobError: when the payload carries no usable price.
         """
         payload = self._get("/midpoint", params={"token_id": token_id})
         if isinstance(payload, dict):
-            value = payload.get("midpoint", payload.get("price", payload.get("data")))
+            value = payload.get(
+                "mid", payload.get("midpoint", payload.get("price", payload.get("data")))
+            )
             if isinstance(value, dict):
-                value = value.get("midpoint", 0.0)
+                value = value.get("mid", value.get("midpoint", 0.0))
+            if value is None:
+                raise ClobError(
+                    f"CLOB /midpoint returned no price for token {token_id}: {payload!r}"
+                )
             return float(value)
         return float(payload)
+
+    def get_midpoints(self, token_ids: list[str]) -> dict[str, float]:
+        """Mid prices for many tokens, best-effort batched.
+
+        GET /midpoints?token_ids=a,b,c (documented, up to 500 ids, 500/10s).
+        **Live-checked 2026-10-02: this deployment rejects every input** —
+        including the docs' own example — with ``{"error": "Invalid payload"}``,
+        so the batch call is attempted once and then falls back to one
+        ``/midpoint`` call per token (which works). Callers therefore get the
+        same result either way; the batch is purely a latency optimization and
+        never a correctness dependency.
+
+        Args:
+            token_ids: CLOB token ids (duplicates are collapsed).
+
+        Returns:
+            ``{token_id: mid}`` for the tokens that answered; missing tokens
+            are simply absent (never guessed).
+        """
+        wanted = [str(t) for t in dict.fromkeys(token_ids) if str(t)]
+        if not wanted:
+            return {}
+        try:
+            payload = self._get(
+                "/midpoints", params={"token_ids": ",".join(wanted)}
+            )
+            if isinstance(payload, dict) and "error" not in payload:
+                out: dict[str, float] = {}
+                for token, value in payload.items():
+                    if isinstance(value, dict):
+                        value = value.get("mid", value.get("midpoint"))
+                    try:
+                        out[str(token)] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                if out:
+                    return out
+            log.info("CLOB /midpoints unavailable; falling back per token")
+        except Exception as exc:  # noqa: BLE001 - batch is best-effort only
+            log.info("CLOB /midpoints failed (%s); falling back per token", exc)
+        out = {}
+        for token in wanted:
+            try:
+                out[token] = self.get_midpoint(token)
+            except Exception as exc:  # noqa: BLE001 - absent, never guessed
+                log.info("CLOB /midpoint failed for %s (%s)", token, exc)
+        return out
+
+    def get_prices(
+        self, token_ids: list[str], side: str = "BUY"
+    ) -> dict[str, float]:
+        """Executable-side prices for many tokens, best-effort batched.
+
+        GET /prices?token_ids=a,b&sides=BUY,SELL (documented). Like
+        ``/midpoints``, the batch is **not usable on this deployment**
+        (live-checked 2026-10-02: ``Invalid payload`` for every input), so this
+        falls back to one ``/price`` call per token. ``sides`` must be sent
+        positionally aligned with ``token_ids``, so the same ``side`` is
+        repeated once per id.
+
+        Args:
+            token_ids: CLOB token ids (duplicates collapsed).
+            side: "BUY" | "SELL" applied to every token.
+
+        Returns:
+            ``{token_id: price}`` for the tokens that answered.
+        """
+        wanted = [str(t) for t in dict.fromkeys(token_ids) if str(t)]
+        if not wanted:
+            return {}
+        upper = str(side or "BUY").upper()
+        try:
+            payload = self._get(
+                "/prices",
+                params={
+                    "token_ids": ",".join(wanted),
+                    "sides": ",".join([upper] * len(wanted)),
+                },
+            )
+            if isinstance(payload, dict) and "error" not in payload:
+                out: dict[str, float] = {}
+                for token, value in payload.items():
+                    if isinstance(value, dict):
+                        value = value.get(upper, value.get("price"))
+                    try:
+                        out[str(token)] = float(value)
+                    except (TypeError, ValueError):
+                        continue
+                if out:
+                    return out
+            log.info("CLOB /prices unavailable; falling back per token")
+        except Exception as exc:  # noqa: BLE001 - batch is best-effort only
+            log.info("CLOB /prices failed (%s); falling back per token", exc)
+        out = {}
+        for token in wanted:
+            try:
+                out[token] = self.get_price(token, side=upper)
+            except Exception as exc:  # noqa: BLE001 - absent, never guessed
+                log.info("CLOB /price failed for %s (%s)", token, exc)
+        return out
 
     def get_orderbook(self, token_id: str) -> dict:
         """Full order book for a token.
@@ -245,19 +438,24 @@ class ClobClient:
     ) -> list[dict]:
         """Price history for a token.
 
-        GET /prices-history — 1000/10s.
+        GET /prices-history — 1000/10s. **Live-checked 2026-10-02: the query
+        key is ``market``** (the asset/token id); sending ``token_id=`` returns
+        a well-formed but *empty* history, so the parameter name — not the
+        endpoint — was why the predictor had no price history at all. The
+        argument keeps the ``token_id`` name because that is what it is; it is
+        sent as ``market``.
 
         Args:
-            token_id: CLOB token id.
+            token_id: CLOB token id (the asset id ``market`` takes).
             start_ts: Unix start (seconds), optional.
             end_ts: Unix end (seconds), optional.
             interval: Bucket, e.g. "1h".
             fidelity: Fidelity hint (minutes), optional.
 
         Returns:
-            List of history points.
+            List of history points (``{"t": epoch_s, "p": price}``).
         """
-        params: dict = {"token_id": token_id, "interval": interval}
+        params: dict = {"market": token_id, "interval": interval}
         if start_ts is not None:
             params["startTs"] = start_ts
         if end_ts is not None:

@@ -75,6 +75,72 @@ def test_x_centric_market_is_labelled_proxy():
     assert "proxy" in verdict["reason"]
 
 
+# ---------------------------------------------------- tag-based routing --
+def test_unrelated_category_tags_skip_the_pulse_despite_social_wording():
+    """Gamma tags route the pulse: a sports market stays out of it.
+
+    Live-checked 2026-10-02: tags arrive as ``[{"slug", "label", ...}]`` when
+    the market is fetched with ``include_tag=true``.
+    """
+    verdict = classify_market(
+        {
+            "question": "Will the viral post about the final reach 1M likes?",
+            "slug": "final-likes",
+            "tags": [{"slug": "soccer", "label": "Soccer"}],
+        }
+    )
+    assert verdict["relevance"] == "none"
+    assert "soccer" in verdict["reason"]
+    assert verdict["tags"] == ["soccer"]
+
+
+def test_social_category_tags_route_the_pulse_without_social_wording():
+    verdict = classify_market(
+        {
+            "question": "Will the launch event break the internet?",
+            "slug": "launch-event",
+            "tags": [{"slug": "celebrity", "label": "Celebrity"}],
+        }
+    )
+    assert verdict["relevance"] == "direct"
+    assert "social-category tags" in verdict["reason"]
+
+
+def test_a_market_with_no_tags_still_routes_by_text():
+    verdict = classify_market(
+        {"question": "Will #hunchfall trend on bluesky?", "slug": "trend"}
+    )
+    assert verdict["relevance"] == "direct"
+    assert verdict["tags"] == []
+
+
+def test_market_tag_slugs_tolerates_strings_and_junk():
+    from app.social import market_tag_slugs
+
+    assert market_tag_slugs({"tags": [{"slug": "A"}, {"label": "B"}, "C"]}) == [
+        "a",
+        "b",
+        "c",
+    ]
+    assert market_tag_slugs({"tags": "soccer"}) == []
+    assert market_tag_slugs({}) == []
+
+
+def test_skipped_market_is_marked_missing_not_silently_empty(tmp_path):
+    """A skipped pulse must not look like a market with zero chatter."""
+    settings = make_settings(tmp_path)
+    block = SocialAnalyzer(settings).analyze(
+        {
+            "question": "Will it rain tomorrow?",
+            "slug": "rain",
+            "tags": [{"slug": "weather"}],
+        }
+    )
+    assert block["relevance"] == "none"
+    assert block["missing"] == ["skipped: not a social-outcome category"]
+    assert "posts_window" not in block
+
+
 # ------------------------------------------------------------- collectors --
 def test_jetstream_window_counts_posts_and_engagement(tmp_path, monkeypatch):
     base = 1_000_000_000_000_000

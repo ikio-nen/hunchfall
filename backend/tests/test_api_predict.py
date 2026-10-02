@@ -92,6 +92,104 @@ def test_predict_happy_path_records_a_prediction(tmp_path, monkeypatch):
     assert audit.query("fill") == []  # prediction only — never a fill
 
 
+def test_predict_carries_price_history_features(tmp_path, monkeypatch):
+    """``/prices-history`` is now a real model input, not an unused client method."""
+    from datetime import datetime, timezone
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    history = [
+        {"t": now - 86400, "p": 0.40},
+        {"t": now - 3600, "p": 0.45},
+        {"t": now, "p": 0.50},
+    ]
+    client, _ = _client(
+        tmp_path, monkeypatch, clob=lambda s: FakeClob(s, history=history)
+    )
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 200, resp.text
+    feats = resp.json()["snapshot"]["features"]
+    assert feats["price_history"]["change_24h"] == 0.10
+    assert feats["price_history"]["change_1h"] == 0.05
+    # the tape records which USD definition its numbers use
+    assert feats["tape"]["usd_basis"] == "size_x_price"
+
+
+def test_predict_still_works_when_price_history_is_unavailable(tmp_path, monkeypatch):
+    """Price history is a feature: its loss is named, never fatal."""
+
+    class BrokenHistoryClob(FakeClob):
+        def get_prices_history(self, token_id, **kwargs):
+            raise RuntimeError("history down")
+
+    client, _ = _client(tmp_path, monkeypatch, clob=BrokenHistoryClob)
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "price_history" in body["snapshot"]["missing"]
+    assert "price_history" not in body["snapshot"]["features"]
+
+
+def test_price_history_never_forces_abstention(tmp_path, monkeypatch):
+    """A huge price move is a feature, not a veto — abstention stays edge-based.
+
+    The tape/price-history numbers ride in the snapshot; only the model's edge
+    vs the market can abstain.
+    """
+    from datetime import datetime, timezone
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    crash = [
+        {"t": now - 86400, "p": 0.90},
+        {"t": now - 3600, "p": 0.60},
+        {"t": now, "p": 0.05},
+    ]
+    # Jev returns p_true an edge clear of the market (0.35 vs 0.50 -> -0.15),
+    # so the prediction goes out despite the 0.85 collapse in price history.
+    client, _ = _client(
+        tmp_path,
+        monkeypatch,
+        clob=lambda s: FakeClob(s, history=crash),
+        jev=lambda s: FakeJev(s, p_true=0.35),
+    )
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["snapshot"]["features"]["price_history"]["change_24h"] == -0.85
+    assert body["prediction"]["abstained"] is False  # edge-based, not price-based
+    assert body["prediction"]["direction"] == "NO"
+
+
+def test_tape_prefers_cash_and_falls_back_to_the_plain_shape(tmp_path, monkeypatch):
+    """If filter_type=CASH is rejected, the tape retries without it."""
+    from app.polymarket.data_api import DataApiError
+
+    class CashRejectingTape(FakeTradesApi):
+        def __init__(self, settings):
+            super().__init__(settings)
+            self.seen: list[str | None] = []
+
+        def get_trades_v2(self, condition, limit=100, cursor=None, **kwargs):
+            self.seen.append(kwargs.get("filter_type"))
+            if kwargs.get("filter_type"):
+                raise DataApiError("cash rejected")
+            return super().get_trades_v2(condition, limit=limit, cursor=cursor)
+
+    made: list[CashRejectingTape] = []
+
+    def data_api_factory(settings):
+        fake = CashRejectingTape(settings)
+        made.append(fake)
+        return fake
+
+    client, _ = _client(tmp_path, monkeypatch, data_api=data_api_factory)
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 200, resp.text
+    feats = resp.json()["snapshot"]["features"]
+    assert feats["tape"]["usd_basis"] == "size_x_price"
+    assert feats["tape"]["buy_usd"] == 906.0  # the fallback rows were used
+    assert made[0].seen == ["CASH", None]  # preferred CASH, then plain
+
+
 def test_predict_unknown_slug_is_404_and_persists_nothing(tmp_path, monkeypatch):
     client, settings = _client(
         tmp_path, monkeypatch, gamma=lambda s: FakeGamma(s, not_found=True)
