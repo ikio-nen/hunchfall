@@ -234,16 +234,27 @@ class GammaClient:
         return self._get(f"/markets/slug/{slug}")
 
     def list_markets(
-        self, limit: int = 100, after_cursor: str | None = None
+        self,
+        limit: int = 100,
+        after_cursor: str | None = None,
+        order: str | None = None,
+        ascending: bool | None = None,
     ) -> tuple[list[dict], str | None]:
         """Fetch one page of markets (keyset pagination).
 
         GET /markets — rate limit 300/10s. The response carries
         ``next_cursor``; pass it back as ``after_cursor`` for the next page.
 
+        NOTE: ``GET /markets`` will be deprecated in favor of
+        ``GET /markets/keyset`` in a future release (verified 2026-09-30).
+
         Args:
             limit: Page size.
             after_cursor: Keyset cursor from the previous page, or None.
+            order: Comma-separated fields to order by (e.g. "volume24hr").
+                The official spec does NOT enumerate allowed values —
+                "volume24hr" is community-documented; verify live.
+            ascending: Sort direction for ``order``.
 
         Returns:
             (markets, next_cursor) — next_cursor is None at the last page.
@@ -251,6 +262,10 @@ class GammaClient:
         params: dict = {"limit": limit}
         if after_cursor:
             params["after_cursor"] = after_cursor
+        if order:
+            params["order"] = order
+        if ascending is not None:
+            params["ascending"] = str(ascending).lower()
         payload = self._get("/markets", params=params)
         if isinstance(payload, list):
             return payload, None

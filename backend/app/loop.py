@@ -10,6 +10,11 @@ Pipeline per cycle::
       -> PaperEngine (paper fill, category taker fee, book-walk)
       -> audit log + data/state.json
 
+    Plus two extra candidate feeds into the same pipeline: the 6-hourly
+    Muse trend scan (``app/scraper/muse_scan.py``) and the in-process
+    millisecond volume scanner (``app/scraper/fast_scan.py`` — one Gamma
+    /markets GET per cycle, top-N by 24h volume, no AI/tokens/approvals).
+
 PAPER TRADING ONLY. Every stage failure is caught, recorded as a
 ``stage_error`` audit event, and tolerated: with no sources configured the
 loop honestly reports ``"no opportunities"`` instead of inventing trades.
@@ -42,9 +47,11 @@ from app.paths import (
 from app.policy.gate import RiskGate, Signal
 from app.polymarket.clob import ClobClient
 from app.polymarket.data_api import DataApiClient
-from app.polymarket.gamma import GammaClient, negrisk_sum
+from app.polymarket.gamma import GammaClient, is_resolved, negrisk_sum
 from app.scraper import Story
+from app.scraper.fast_scan import fetch_top_volume_markets, volume_24h
 from app.scraper.filter import dedupe_by_url, filter_by_engagement
+from app.scraper.muse_scan import MuseScanCandidate, load_muse_scan
 from app.scraper.gdelt import fetch_gdelt_trending
 from app.scraper.news import fetch_news_trending
 from app.scraper.reddit import fetch_reddit_trending
@@ -206,6 +213,46 @@ def _uma_dispute(market: dict) -> bool:
     return False
 
 
+def _fast_scan_context(
+    market: dict, volume_usd: float, top_n: int = 5
+) -> tuple[str, str]:
+    """Deterministic Jev context for a fast-scan candidate (no AI, no cost).
+
+    The fast scanner has no story and no Muse summary, so Jev's ``noul``
+    question would otherwise judge on price alone. This packs the
+    deterministic facts the pipeline already knows — category, tags,
+    time to resolution, NegRisk sanity — into ``extra_context``, and says
+    WHY the market surfaced in ``news_summary``.
+
+    Args:
+        market: Slimmed Gamma market dict (see app/scraper/fast_scan).
+        volume_usd: Precomputed 24h volume in USD.
+        top_n: The FAST_SCAN_TOP_N setting, so the prompt text stays true.
+
+    Returns:
+        (news_summary, extra_context) for the Jev DecisionState.
+    """
+    category = _fee_category(market, "")
+    tags = ",".join(
+        str(t.get("label") or t.get("slug") or t.get("name") or "")
+        if isinstance(t, dict)
+        else str(t)
+        for t in (market.get("tags") or [])
+    ) or "none"
+    hours = _hours_to_resolution(market)
+    negrisk = negrisk_sum(market)
+    summary = (
+        f"Fast volume scan: this market is in the top-{top_n} by 24h volume "
+        f"(${volume_usd:,.0f}) in {category} on Polymarket right now."
+    )
+    context = (
+        f"scan_volume_24h_usd={volume_usd:.2f};category={category};"
+        f"tags={tags};hours_to_resolution={hours:.1f};"
+        f"negrisk_sum={negrisk if negrisk is not None else 'unknown'}"
+    )
+    return summary, context
+
+
 def _pick_market(gamma: GammaClient, story: Story, audit: AuditLog) -> dict | None:
     """Match a story to one Polymarket market via Gamma search.
 
@@ -264,6 +311,88 @@ def _pick_market(gamma: GammaClient, story: Story, audit: AuditLog) -> dict | No
                 "event_title": str(ev.get("title") or ""),
             }
     return None
+
+
+def _resolve_muse_market(
+    gamma: GammaClient, cand: MuseScanCandidate, audit: AuditLog
+) -> dict | None:
+    """Resolve a Muse scan candidate to a live market via Gamma.
+
+    Tries a direct market-slug lookup, then an event-slug lookup (first
+    usable nested market), then a question-text search as a last resort.
+    Returns the same dict shape as ``_pick_market`` or None.
+    """
+    market: dict | None = None
+    if cand.slug:
+        try:
+            market = gamma.get_market_by_slug(cand.slug) or None
+        except Exception as exc:  # noqa: BLE001 - tolerated, recorded
+            audit.record(
+                "stage_error",
+                {
+                    "stage": "gamma.get_market_by_slug",
+                    "error": str(exc),
+                    "slug": cand.slug,
+                },
+            )
+        if not market:
+            try:
+                event = gamma.get_event_by_slug(cand.slug) or {}
+            except Exception as exc:  # noqa: BLE001 - tolerated, recorded
+                audit.record(
+                    "stage_error",
+                    {
+                        "stage": "gamma.get_event_by_slug",
+                        "error": str(exc),
+                        "slug": cand.slug,
+                    },
+                )
+                event = {}
+            for m in event.get("markets") or []:
+                if _market_tokens(m):
+                    market = m
+                    break
+    if not market:
+        # Fallback: the slug may be stale; search by the question text.
+        try:
+            results = (
+                gamma.search_markets_public(cand.market_question[:120], limit=5)
+                or []
+            )
+        except Exception as exc:  # noqa: BLE001 - tolerated, recorded
+            audit.record(
+                "stage_error", {"stage": "gamma.search_markets_public", "error": str(exc)}
+            )
+            return None
+        for m in results:
+            if _market_tokens(m):
+                market = m
+                break
+    if not market:
+        return None
+    if is_resolved(market):
+        audit.record(
+            "veto",
+            {
+                "market_id": str(market.get("conditionId") or market.get("id")),
+                "question": str(market.get("question") or cand.market_question),
+                "reason": "muse_scan_resolved",
+                "detail": "scan candidate already resolved; skipped",
+                "ts": utcnow_iso(),
+            },
+        )
+        return None
+    tokens = _market_tokens(market)
+    if not tokens:
+        return None
+    yes_token, _ = tokens
+    return {
+        "market_id": str(market.get("conditionId") or market.get("id")),
+        "token_id": yes_token,
+        "question": str(market.get("question") or cand.market_question),
+        "market": market,
+        "event_title": "",
+    }
 
 
 def _trade_ts(trade: dict) -> float | None:
@@ -515,13 +644,17 @@ def run_once(settings: Settings) -> dict:
     positions: list[dict] = state.get("positions", [])
 
     stories = _fetch_stories(settings, audit)
+    muse_candidates = load_muse_scan(data_dir())
+    fast_scan_on = bool(settings.FAST_SCAN_ENABLED)
 
     n_signals = n_approved = n_vetoed = 0
+    n_fast_seen = 0
+    seen_market_ids: set[str] = set()  # cross-source dedup within one cycle
     run_signals: list[dict] = []
     run_vetoes: list[dict] = []
     run_fills: list[dict] = []
 
-    if stories:
+    if stories or muse_candidates or fast_scan_on:
         # Lazy clients: no network objects until there is work to do, so the
         # empty-feed offline path stays completely offline.
         engine = PaperEngine(settings, audit)
@@ -529,6 +662,109 @@ def run_once(settings: Settings) -> dict:
         clob = ClobClient(settings)
         data_api = DataApiClient(settings)
         jev = JevClient(settings)
+
+    def _process_picked(
+        picked: dict,
+        news_summary: str,
+        extra_context: str,
+        source: str,
+        news_ts: str,
+    ) -> None:
+        """Shared pipeline for one resolved market: snapshot -> Jev -> gate.
+
+        Used by both the story-matched path and the Muse scan path.
+        Mutates ``cash``/``positions`` and the run counters via closure.
+        """
+        nonlocal n_signals, n_approved, n_vetoed, cash, positions
+        snap = _snapshot(
+            clob, data_api, picked["market_id"], picked["token_id"], audit
+        )
+        if snap is None:
+            return
+
+        question = picked["question"]
+        market = picked["market"]
+        try:
+            decision = jev.decide(
+                DecisionState(
+                    news_summary=news_summary,
+                    market_question=question,
+                    yes_price=snap["mid_price"],
+                    extra_context=extra_context,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - tolerated, recorded
+            audit.record(
+                "stage_error", {"stage": "jev.decide", "error": str(exc)}
+            )
+            return
+        p_true = float(decision.p_true)
+
+        signal = Signal(
+            market_id=picked["market_id"],
+            token_id=picked["token_id"],
+            question=question,
+            p_true=p_true,
+            market_price=snap["mid_price"],
+            spread_cents=snap["spread_cents"],
+            top_book_depth_usd=snap["top_book_depth_usd"],
+            hours_to_resolution=_hours_to_resolution(market),
+            news_ts=news_ts,
+            price_ts=snap["price_ts"],
+            negrisk_sum=negrisk_sum(market),
+            uma_dispute=_uma_dispute(market),
+            jev_confidence=decision.jev_confidence,
+            jev_choice=decision.choice,
+            fee_category=_fee_category(market, picked["event_title"]),
+            book_asks=snap["book_asks"],
+            book_bids=snap["book_bids"],
+        )
+        n_signals += 1
+        audit.record(
+            "signal",
+            {
+                **asdict(signal),
+                "model_choice": decision.choice,
+                "model_confidence": decision.jev_confidence,
+                "model_version": decision.jev_model,  # audit pins the model
+                "model_mock": decision.mock,
+                "candidate_source": source,
+                "last_trade_ts": snap["last_trade_ts"],
+            },
+        )
+        run_signals.append({**asdict(signal), "model_mock": decision.mock})
+
+        result = gate.evaluate(
+            signal,
+            _exposure_usd(positions),
+            bankroll,
+            open_positions_count=len(positions),
+        )
+
+        if not result.approved:
+            n_vetoed += 1
+            for v in result.vetoes:
+                entry = {
+                    "market_id": signal.market_id,
+                    "question": signal.question,
+                    "reason": v.reason,
+                    "detail": v.detail,
+                    "ts": utcnow_iso(),
+                }
+                audit.record("veto", entry)
+                run_vetoes.append(entry)
+            return
+
+        n_approved += 1
+        fill = engine.execute(
+            signal,
+            result.size_usd,
+            fee_category=signal.fee_category,
+            fee_rate_override=_fee_rate_override(market, settings),
+        )
+        cash -= fill.filled_usd + fill.fee_usd + fill.slippage_usd
+        positions = _apply_fill(positions, fill, question)
+        run_fills.append(asdict(fill))
 
     try:
         for story in stories[:MAX_STORIES_PER_CYCLE]:
@@ -543,94 +779,63 @@ def run_once(settings: Settings) -> dict:
             picked = _pick_market(gamma, story, audit)
             if picked is None:
                 continue
-            snap = _snapshot(
-                clob, data_api, picked["market_id"], picked["token_id"], audit
-            )
-            if snap is None:
+            if picked["market_id"] in seen_market_ids:
                 continue
+            seen_market_ids.add(picked["market_id"])
+            _process_picked(
+                picked, summary, "", story.source, story.published_at or ""
+            )
 
-            question = picked["question"]
-            market = picked["market"]
-            try:
-                decision = jev.decide(
-                    DecisionState(
-                        news_summary=summary,
-                        market_question=question,
-                        yes_price=snap["mid_price"],
-                    )
+        for cand in muse_candidates:
+            picked = _resolve_muse_market(gamma, cand, audit)
+            if picked is None:
+                continue
+            if picked["market_id"] in seen_market_ids:
+                continue
+            seen_market_ids.add(picked["market_id"])
+            _process_picked(
+                picked, cand.news_summary, cand.extra_context, "muse-scan", cand.scanned_at
+            )
+
+        if fast_scan_on:
+            # Millisecond scan: one Gamma /markets page, top-N by 24h volume.
+            # No AI, no files, no tokens — fully automatic inside the loop.
+            for market in fetch_top_volume_markets(
+                gamma,
+                limit=int(settings.FAST_SCAN_PAGE_LIMIT),
+                top_n=int(settings.FAST_SCAN_TOP_N),
+                min_volume_24h=float(settings.FAST_SCAN_MIN_VOLUME_24H),
+                audit=audit,
+            ):
+                n_fast_seen += 1
+                if is_resolved(market):
+                    continue  # pre-filter; the gate would veto it anyway
+                tokens = _market_tokens(market)
+                if not tokens:
+                    continue
+                yes_token, _ = tokens
+                market_id = str(market.get("conditionId") or market.get("id"))
+                if market_id in seen_market_ids:
+                    continue
+                seen_market_ids.add(market_id)
+                vol = volume_24h(market)
+                question = str(market.get("question") or "unknown market")
+                news_summary, extra_context = _fast_scan_context(
+                    market, vol, top_n=int(settings.FAST_SCAN_TOP_N)
                 )
-            except Exception as exc:  # noqa: BLE001 - tolerated, recorded
-                audit.record(
-                    "stage_error", {"stage": "jev.decide", "error": str(exc)}
+                _process_picked(
+                    {
+                        "market_id": market_id,
+                        "token_id": yes_token,
+                        "question": question,
+                        "market": market,
+                        "event_title": "",
+                    },
+                    news_summary,
+                    extra_context,
+                    "fast-scan",
+                    utcnow_iso(),
                 )
-                continue
-            p_true = float(decision.p_true)
-
-            signal = Signal(
-                market_id=picked["market_id"],
-                token_id=picked["token_id"],
-                question=question,
-                p_true=p_true,
-                market_price=snap["mid_price"],
-                spread_cents=snap["spread_cents"],
-                top_book_depth_usd=snap["top_book_depth_usd"],
-                hours_to_resolution=_hours_to_resolution(market),
-                news_ts=story.published_at or "",
-                price_ts=snap["price_ts"],
-                negrisk_sum=negrisk_sum(market),
-                uma_dispute=_uma_dispute(market),
-                jev_confidence=decision.jev_confidence,
-                jev_choice=decision.choice,
-                fee_category=_fee_category(market, picked["event_title"]),
-                book_asks=snap["book_asks"],
-                book_bids=snap["book_bids"],
-            )
-            n_signals += 1
-            audit.record(
-                "signal",
-                {
-                    **asdict(signal),
-                    "model_choice": decision.choice,
-                    "model_confidence": decision.jev_confidence,
-                    "model_version": decision.jev_model,  # audit pins the model
-                    "model_mock": decision.mock,
-                    "story_source": story.source,
-                    "last_trade_ts": snap["last_trade_ts"],
-                },
-            )
-            run_signals.append({**asdict(signal), "model_mock": decision.mock})
-
-            result = gate.evaluate(
-                signal,
-                _exposure_usd(positions),
-                bankroll,
-                open_positions_count=len(positions),
-            )
-
-            if not result.approved:
-                n_vetoed += 1
-                for v in result.vetoes:
-                    entry = {
-                        "market_id": signal.market_id,
-                        "question": signal.question,
-                        "reason": v.reason,
-                        "detail": v.detail,
-                        "ts": utcnow_iso(),
-                    }
-                    audit.record("veto", entry)
-                    run_vetoes.append(entry)
-                continue
-
-            n_approved += 1
-            fill = engine.execute(
-                signal,
-                result.size_usd,
-                fee_category=signal.fee_category,
-                fee_rate_override=_fee_rate_override(market, settings),
-            )
-            cash -= fill.filled_usd + fill.fee_usd + fill.slippage_usd
-            positions = _apply_fill(positions, fill, question)
-            run_fills.append(asdict(fill))
     finally:
         for client in (gamma, clob, data_api, jev):
             try:
@@ -687,6 +892,8 @@ def run_once(settings: Settings) -> dict:
         "status": "ok",
         "mode": "PAPER",
         "stories_seen": len(stories),
+        "muse_candidates_seen": len(muse_candidates),
+        "fast_scan_candidates_seen": n_fast_seen,
         "signals": n_signals,
         "approved": n_approved,
         "vetoed": n_vetoed,

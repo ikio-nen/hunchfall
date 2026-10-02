@@ -25,6 +25,8 @@ build/
 backend/data/*.db
 backend/data/*.db-*
 backend/data/state.json
+backend/data/muse-scans/latest.json
+backend/data/muse-scans/history.jsonl
 backend/playtest_reports/
 
 # OS / editors

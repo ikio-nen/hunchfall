@@ -134,6 +134,16 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     CORS_ORIGINS: str = "http://localhost:5173"
 
+    # ---- Fast volume scanner (in-process, millisecond scan) --------------------
+    # One Gamma /markets GET per loop cycle, top-N by 24h volume. No AI, no
+    # files, no credentials. Cadence is LOOP_INTERVAL_SEC — millisecond
+    # *cadence* is intentionally not offered (rate limits + per-candidate
+    # CLOB/Jev cost downstream).
+    FAST_SCAN_ENABLED: bool = True
+    FAST_SCAN_TOP_N: int = 5
+    FAST_SCAN_PAGE_LIMIT: int = 100
+    FAST_SCAN_MIN_VOLUME_24H: float = 0.0
+
     # Fields that must never be exposed via GET /config (secrets/keys).
     _SECRET_FIELDS: tuple = (
         "JEV_API_KEY",

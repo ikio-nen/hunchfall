@@ -1,0 +1,121 @@
+/* Hunchfall on-page panel — Reflow editorial theme.
+   Cream paper, serif headlines, charcoal ink, mono micro-labels. */
+
+#hunchfall-panel {
+  --hf-bg: #fffbf6;
+  --hf-panel: #ffffff;
+  --hf-sand: #ede6da;
+  --hf-border: #e2dbce;
+  --hf-ink: #363532;
+  --hf-muted: #6b655c;
+  --hf-accent: #363532;
+  --hf-yes: #1db927;
+  --hf-no: #ce2d2d;
+  --hf-paper: #ff903e;
+  --hf-text: #363532;
+
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 300px;
+  z-index: 2147483647;
+  background: var(--hf-panel);
+  border: 1px solid var(--hf-border);
+  border-radius: 12px;
+  color: var(--hf-text);
+  font-family: -apple-system, "Segoe UI", Inter, sans-serif;
+  font-size: 13px;
+  box-shadow: 0 12px 40px rgba(54, 53, 50, 0.16);
+}
+
+#hunchfall-panel .hf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--hf-border);
+  background: var(--hf-sand);
+  border-radius: 12px 12px 0 0;
+}
+
+#hunchfall-panel .hf-brand {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  font-size: 14px;
+  color: var(--hf-ink);
+}
+
+#hunchfall-panel .hf-tag {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--hf-paper);
+}
+
+#hunchfall-panel .hf-close {
+  background: none;
+  border: none;
+  color: var(--hf-muted);
+  font-size: 18px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+#hunchfall-panel .hf-body { padding: 12px; }
+#hunchfall-panel .hf-title {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700; margin-bottom: 8px; font-size: 15px;
+}
+#hunchfall-panel .hf-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+
+#hunchfall-panel .hf-side {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 700;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid;
+}
+#hunchfall-panel .hf-side.yes { color: var(--hf-yes); border-color: var(--hf-yes); }
+#hunchfall-panel .hf-side.no { color: var(--hf-no); border-color: var(--hf-no); }
+
+#hunchfall-panel .hf-prob {
+  font-family: Georgia, "Times New Roman", serif;
+  font-weight: 700; font-size: 15px;
+}
+#hunchfall-panel .hf-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 8px;
+  margin-bottom: 10px;
+}
+#hunchfall-panel .hf-k {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--hf-muted);
+}
+#hunchfall-panel .hf-v { text-align: right; font-weight: 700; }
+#hunchfall-panel .hf-dim { color: var(--hf-muted); font-weight: 400; }
+#hunchfall-panel .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+#hunchfall-panel .hf-reason { font-size: 11px; color: var(--hf-muted); margin-bottom: 10px; }
+#hunchfall-panel .hf-error { font-weight: 700; margin-bottom: 4px; }
+#hunchfall-panel .hf-hint { font-size: 11px; color: var(--hf-muted); }
+#hunchfall-panel .hf-loading { color: var(--hf-muted); }
+
+#hunchfall-panel .hf-actions { display: flex; gap: 8px; }
+#hunchfall-panel .hf-btn {
+  flex: 1;
+  text-align: center;
+  background: var(--hf-ink);
+  color: #fffbf6;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 9px;
+  border-radius: 8px;
+  text-decoration: none;
+}
