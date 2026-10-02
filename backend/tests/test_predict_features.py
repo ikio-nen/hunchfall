@@ -10,6 +10,7 @@ import pytest
 
 from app.predict import (
     PredictUpstreamError,
+    _force_data_quality_abstention,
     book_features,
     build_reasons,
     build_snapshot_text,
@@ -32,9 +33,37 @@ def test_book_features_depth_and_imbalance():
     assert features["imbalance"] == -0.02  # (2450 - 2550) / 5000
 
 
-def test_book_features_empty_side_is_upstream_error():
+def test_book_features_one_sided_keeps_the_available_side():
+    """A bids-only book is feature-bearing, not fatal (near-resolution case)."""
+    book = {
+        "bids": [[0.10, 2.0], [0.99, 1.0]],
+        "asks": [],
+        "last_trade_price": "0.995",
+    }
+    features = book_features(book, levels=5)
+    assert features["one_sided"] == "ask"  # names the EMPTY side
+    assert features["best_bid"] == 0.99  # best-first ranking still applies
+    assert features["bid_depth_usd"] == 1.19  # 0.10*2 + 0.99*1
+    assert "ask_depth_usd" not in features
+    assert "imbalance" not in features  # never fabricate the missing side
+    assert "market_mid" not in features  # resolved by build_features instead
+    assert "spread_cents" not in features
+    assert features["last_trade_price"] == 0.995
+
+
+def test_book_features_one_sided_accepts_live_dict_levels():
+    """The live object-level shape works one-sided too."""
+    book = {"bids": [], "asks": [{"price": "0.02", "size": "500"}]}
+    features = book_features(book, levels=5)
+    assert features["one_sided"] == "bid"
+    assert features["best_ask"] == 0.02
+    assert features["ask_depth_usd"] == 10.0  # 0.02 * 500
+    assert "imbalance" not in features
+
+
+def test_book_features_both_sides_empty_still_raises():
     with pytest.raises(PredictUpstreamError) as exc:
-        book_features({"bids": [], "asks": [[0.51, 100.0]]}, levels=5)
+        book_features({"bids": [], "asks": []}, levels=5)
     assert exc.value.source == "clob"
     assert exc.value.status == 502
 
@@ -188,3 +217,18 @@ def test_snapshot_text_is_bounded_and_mentions_the_base_rate():
     assert "Market: Will it rain tomorrow?" in text
     assert "base rate" in text
     assert len(text) <= 2048
+
+
+def test_reasons_name_the_one_sided_data_quality_abstention():
+    """One-sided books abstain on data quality, quoting the fallback mid."""
+    features = {"market_mid": 0.998, "mid_source": "midpoint", "one_sided": "ask"}
+    decision = _force_data_quality_abstention(
+        features, decide(0.80, 0.998, 0.10, 0.0)
+    )
+    reasons = build_reasons(features, decision, ["book_ask"], 0.10)
+    assert decision["abstained"] is True
+    assert decision["direction"] == "ABSTAIN"
+    assert decision["edge_vs_market"] == -0.198  # computed, kept, overridden
+    assert "abstained: one-sided book (no ask side) — data-quality abstention " \
+        "(mid 0.998 via /midpoint)" in reasons
+

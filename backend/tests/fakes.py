@@ -137,6 +137,8 @@ class FakeClob:
         book: dict | None = None,
         fail: bool = False,
         history: list[dict] | None = None,
+        midpoint: float | None = None,
+        midpoint_fail: bool = False,
     ) -> None:
         self.settings = settings
         # REAL shape and order (live-checked 2026-10-01): level OBJECTS with
@@ -164,6 +166,8 @@ class FakeClob:
         self.fail = fail
         self.token_ids: list[str] = []
         self.history = history
+        self.midpoint = midpoint
+        self.midpoint_fail = midpoint_fail
 
     def get_orderbook(self, token_id: str) -> dict:
         self.token_ids.append(token_id)
@@ -176,7 +180,26 @@ class FakeClob:
             raise RuntimeError("clob down")
         bids, asks = book_levels(self.book)
         if not bids or not asks:
-            raise RuntimeError("empty book")
+            # One-sided book: defer to the configured/live-style midpoint so
+            # the fake keeps serving the derived features the real client can.
+            return self.get_midpoint(token_id)
+        return (bids[0][0] + asks[0][0]) / 2.0
+
+    def get_midpoint(self, token_id: str) -> float:
+        """The market's own midpoint (real ``/midpoint`` contract, ``{"mid": x}``).
+
+        Returns the configured ``midpoint=`` when given (the one-sided tests
+        set it explicitly), else the two-sided fake book's mid; raises when
+        there is no defensible mid, mirroring the live endpoint's failure
+        mode that the predictor's fallback chain must survive.
+        """
+        if self.midpoint_fail:
+            raise RuntimeError("midpoint down")
+        if self.midpoint is not None:
+            return float(self.midpoint)
+        bids, asks = book_levels(self.book)
+        if not bids or not asks:
+            raise RuntimeError("midpoint unavailable for a one-sided book")
         return (bids[0][0] + asks[0][0]) / 2.0
 
     def get_midpoints(self, token_ids: list[str]) -> dict[str, float]:
