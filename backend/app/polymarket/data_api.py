@@ -37,9 +37,67 @@ from app.config import Settings
 
 log = logging.getLogger(__name__)
 
+#: v2 error bodies carry this flag; only a ``retryable: true`` failure is
+#: retried. Missing/unparseable bodies keep the old status-based behavior.
+_MAX_CONDITIONS_PER_CALL = 20
+
 
 class DataApiError(RuntimeError):
     """Raised when a Data API request fails; names the endpoint."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        trace_id: str = "",
+        retryable: bool | None = None,
+    ) -> None:
+        """Store the upstream trace id (and retryability) with the message.
+
+        Args:
+            message: Human-readable failure, naming the endpoint.
+            trace_id: Opaque upstream ``trace_id`` (empty when unavailable).
+            retryable: Upstream ``retryable`` flag, or None when unknown.
+        """
+        super().__init__(message)
+        self.trace_id = trace_id
+        self.retryable = retryable
+
+
+def _error_body(resp: object) -> dict:
+    """Best-effort parse of a v2 error body (``{error, code, retryable, trace_id}``).
+
+    Args:
+        resp: An httpx-like response.
+
+    Returns:
+        The error dict, or ``{}`` when the body is not a JSON object.
+    """
+    try:
+        payload = resp.json()  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - a non-JSON error body is fine
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _error_trace(resp: object, body: dict) -> tuple[str, bool | None]:
+    """Extract ``(trace_id, retryable)`` from a v2 error response.
+
+    The trace id falls back to the ``x-trace-id`` header (every v2 response
+    echoes it), so the id is logged even when the body is unreadable.
+
+    Args:
+        resp: An httpx-like response.
+        body: Parsed error body.
+
+    Returns:
+        ``(trace_id, retryable)``; both may be empty/None.
+    """
+    headers = getattr(resp, "headers", {}) or {}
+    trace_id = str(body.get("trace_id") or headers.get("x-trace-id") or "")
+    raw = body.get("retryable")
+    retryable = bool(raw) if isinstance(raw, bool) else None
+    return trace_id, retryable
 
 
 def _retry_after_seconds(raw: str | None) -> float:
@@ -97,8 +155,12 @@ class DataApiClient:
     def _get_v2(self, path: str, params: dict | None = None) -> tuple[list, dict]:
         """GET a v2 route and unwrap the ``{data, pagination}`` envelope.
 
-        Never sends ``offset`` (v2 rejects it) and honors ``Retry-After``
-        on 429/503 up to two retries (sleep capped at 5s).
+        Never sends ``offset`` (v2 rejects it). A ``429``/``503`` is retried
+        (up to two retries, sleep capped at 5s) when the v2 error body says
+        ``retryable: true`` — or when the body is unreadable, which keeps the
+        pre-existing status-based behavior. A non-retryable failure is raised
+        immediately with the upstream ``trace_id`` attached, so callers can log
+        it for operator correlation.
 
         Args:
             path: v2 path, e.g. "/v2/activity".
@@ -118,13 +180,27 @@ class DataApiClient:
         }
         last_exc: Exception | None = None
         last_status: int | None = None
+        last_trace = ""
         for attempt in range(3):
             try:
                 resp = self._http.get(path, params=clean)
-                # 503 = transient upstream overload: retry it exactly like a
-                # rate limit, honoring Retry-After when the API sends one.
                 if resp.status_code in (429, 503):
                     last_status = resp.status_code
+                    body = _error_body(resp)
+                    trace_id, retryable = _error_trace(resp, body)
+                    last_trace = trace_id or last_trace
+                    if retryable is False:
+                        # Upstream says the request itself is the problem;
+                        # retrying it unchanged would just burn the budget.
+                        message = (
+                            f"Data API v2 request failed [{endpoint}]: "
+                            f"HTTP {resp.status_code} {body.get('error') or ''}".strip()
+                        )
+                        if trace_id:
+                            message = f"{message} (trace_id={trace_id})"
+                        raise DataApiError(
+                            message, trace_id=trace_id, retryable=False
+                        )
                     if attempt >= 2:
                         break
                     retry_after = _retry_after_seconds(resp.headers.get("Retry-After"))
@@ -137,13 +213,18 @@ class DataApiClient:
                     pagination = payload.get("pagination") or {}
                     return (data if isinstance(data, list) else []), pagination
                 return (payload if isinstance(payload, list) else []), {}
+            except DataApiError:
+                raise
             except httpx.HTTPError as exc:
                 last_exc = exc
                 break
         detail = (
             last_exc if last_exc is not None else f"HTTP {last_status} after retries"
         )
-        raise DataApiError(f"Data API v2 request failed [{endpoint}]: {detail}")
+        message = f"Data API v2 request failed [{endpoint}]: {detail}"
+        if last_trace:
+            message = f"{message} (trace_id={last_trace})"
+        raise DataApiError(message, trace_id=last_trace)
 
     def get_activity_v2(
         self,
@@ -223,6 +304,8 @@ class DataApiClient:
         condition: str,
         limit: int = 100,
         cursor: str | None = None,
+        *,
+        filter_type: str | None = None,
     ) -> list[dict]:
         """Per-trade tape for one market (RFC-003 predictor).
 
@@ -231,10 +314,19 @@ class DataApiClient:
         ``size × price``** — these rows have no ``usdc_size`` (see
         docs/API_INVENTORY.md). An empty list is a valid zero-state.
 
+        ``filter_type`` is documented as ``CASH``/``TOKENS``, but
+        **live-checked 2026-10-02: the condition shape ignores it** — 20/20
+        CASH rows came back byte-identical to TOKENS rows, with ``size`` still
+        in shares. It is accepted here (and sent when requested) purely so the
+        caller can ask; USD is still computed as ``size × price`` because that
+        is what the rows actually mean.
+
         Args:
             condition: Market condition id.
             limit: Page size.
             cursor: Opaque next_cursor from the previous page.
+            filter_type: Optional CASH | TOKENS hint (accepted, not honored
+                by the condition shape today).
 
         Returns:
             List of trade item dicts.
@@ -242,8 +334,54 @@ class DataApiClient:
         params: dict = {"condition": condition, "limit": int(limit)}
         if cursor:
             params["cursor"] = cursor
+        if filter_type:
+            params["filter_type"] = filter_type
         data, _ = self._get_v2("/v2/trades", params)
         return data
+
+    def get_trades_v2_many(
+        self, conditions: list[str], limit: int = 100
+    ) -> dict[str, list[dict]]:
+        """One ``/v2/trades`` call for up to 20 markets, split client-side.
+
+        The docs allow at most 20 distinct comma-separated ``condition`` ids
+        per call, and the feed interleaves them (live-checked 2026-10-02: a
+        two-id batch returned rows for both). Rows are grouped by their own
+        ``condition_id`` — **a row whose id was not requested is dropped**, so a
+        silently-ignored filter can never be mistaken for a match.
+
+        More than 20 ids are chunked into consecutive batches; ``limit``
+        applies per call.
+
+        Args:
+            conditions: Condition ids (duplicates collapse, order kept).
+            limit: Page size per call.
+
+        Returns:
+            ``{condition_id: [rows]}`` — every requested id is a key, with an
+            empty list when that market had no rows (the meaningful
+            zero-state).
+        """
+        wanted = [str(c) for c in dict.fromkeys(conditions) if str(c)]
+        out: dict[str, list[dict]] = {c: [] for c in wanted}
+        if not wanted:
+            return out
+        for start in range(0, len(wanted), _MAX_CONDITIONS_PER_CALL):
+            chunk = wanted[start : start + _MAX_CONDITIONS_PER_CALL]
+            rows = self.get_trades_v2(condition=",".join(chunk), limit=limit)
+            allowed = set(chunk)
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("condition_id") or "")
+                if key in allowed:
+                    out[key].append(row)
+                else:
+                    log.warning(
+                        "data-api: /v2/trades returned unrequested condition %r",
+                        key,
+                    )
+        return out
 
     def get_prices_history_v2(
         self,
@@ -254,7 +392,9 @@ class DataApiClient:
     ) -> list[dict]:
         """Price history (v2) for a token.
 
-        GET /v2/prices-history — 200/10s.
+        GET /v2/prices-history — 200/10s. The v2 route is keyed by
+        ``token_id`` (unlike CLOB's ``/prices-history``, which takes
+        ``market``); both are sent with their own documented key.
 
         Args:
             token_id: CLOB token id.

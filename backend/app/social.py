@@ -87,6 +87,33 @@ _SOCIAL_TERMS = (
     "twitter",
 )
 
+#: Gamma tag slugs that mark a market whose *outcome* can plausibly be
+#: moved by social activity. Live-checked 2026-10-02: the public tag taxonomy
+#: is small (~100 rows) and does not contain a literal "social" tag, so this
+#: is an allow-list of the categories that carry social-outcome markets
+#: (celebrity/pop-culture/politics personalities, tech figures, crypto
+#: culture) rather than an exhaustive map. Tags only ever *widen* the
+#: keyword check below — a market must still look social by text to be
+#: routed to the full pulse.
+_SOCIAL_TAG_SLUGS = frozenset(
+    {
+        "celebrity",
+        "celebrities",
+        "pop-culture",
+        "entertainment",
+        "social-media",
+        "influencers",
+        "twitter",
+        "x",
+        "elon-musk",
+        "tech",
+        "ai",
+        "crypto",
+        "meme-coins",
+        "memes",
+    }
+)
+
 _STOPWORDS = frozenset(
     {
         "will",
@@ -181,26 +208,86 @@ def _subject_terms(market: dict) -> str:
     return " ".join(keep[:8])
 
 
+def market_tag_slugs(market: dict) -> list[str]:
+    """Lowercased tag slugs from a Gamma market (``include_tag=true``).
+
+    Args:
+        market: Gamma-shaped market dict; ``tags`` is a list of
+            ``{"slug", "label", ...}`` objects.
+
+    Returns:
+        Tag slugs (lowercased, deduped, order kept); ``[]`` when absent.
+    """
+    raw = market.get("tags")
+    if not isinstance(raw, (list, tuple)):
+        return []
+    out: list[str] = []
+    for tag in raw:
+        if isinstance(tag, dict):
+            slug = str(tag.get("slug") or tag.get("label") or "").strip().lower()
+        else:
+            slug = str(tag or "").strip().lower()
+        if slug and slug not in out:
+            out.append(slug)
+    return out
+
+
 def classify_market(market: dict) -> dict:
     """Decide whether a market is a social-outcome market and how to read it.
 
+    Routing is **category-first**:
+
+    * when the market carries Gamma ``tags`` (fetched with
+      ``include_tag=true``), a social-category tag is required — a sports or
+      geopolitics market stays out of the pulse even if its wording happens to
+      contain a social word, and a social-category tag routes the pulse in even
+      if the wording is unexpected;
+    * when tags are absent or empty (the field is optional), the
+      question/slug keyword match decides, exactly as before.
+
+    The trade-off is deliberate: the tag taxonomy is curated and small
+    (live-checked 2026-10-02, ~100 public slugs, with no literal "social"
+    tag), so a genuinely social market carrying only generic tags can be
+    skipped. That is the safe direction for this feature — a skipped pulse is
+    reported in ``missing``, never silently rendered as zero chatter.
+
+    The social block remains a feature only — it never sets direction or
+    abstention (RFC-003 invariant 8).
+
     Args:
-        market: Gamma-shaped market dict (uses ``question`` + ``slug``).
+        market: Gamma-shaped market dict (uses ``question``, ``slug``, and
+            optional ``tags``).
 
     Returns:
         ``{"relevance": "direct"|"proxy"|"none", "proxy": bool,
-        "reason": str, "subject": str, "terms": str}``.
+        "reason": str, "subject": str, "terms": str, "tags": list[str]}``.
     """
     text = f"{market.get('question') or ''} {market.get('slug') or ''}"
     lowered = text.lower()
     terms = _subject_terms(market)
-    if not _has_term(lowered, _SOCIAL_TERMS):
+    tags = market_tag_slugs(market)
+    social_tagged = bool(_SOCIAL_TAG_SLUGS & set(tags))
+    if tags and not social_tagged:
+        return {
+            "relevance": "none",
+            "proxy": False,
+            "reason": (
+                "not a social-outcome category (tags: "
+                + ", ".join(tags[:4])
+                + ") — social pulse skipped"
+            ),
+            "subject": "",
+            "terms": terms,
+            "tags": tags,
+        }
+    if not social_tagged and not _has_term(lowered, _SOCIAL_TERMS):
         return {
             "relevance": "none",
             "proxy": False,
             "reason": "not a social-outcome market — social pulse skipped",
             "subject": "",
             "terms": terms,
+            "tags": tags,
         }
     if _has_term(lowered, _X_TERMS):
         return {
@@ -213,16 +300,20 @@ def classify_market(market: dict) -> dict:
             ),
             "subject": terms,
             "terms": terms,
+            "tags": tags,
         }
+    routed_by = "social-category tags" if social_tagged else "subject text"
     return {
         "relevance": "direct",
         "proxy": False,
         "reason": (
-            "subject observable on Bluesky (keyless Jetstream window) — the "
-            "window counts are network-wide (unfiltered), not subject-only"
+            f"social-outcome market (routed by {routed_by}) — subject "
+            "observable on Bluesky (keyless Jetstream window); the window "
+            "counts are network-wide (unfiltered), not subject-only"
         ),
         "subject": terms,
         "terms": terms,
+        "tags": tags,
     }
 
 
@@ -456,7 +547,12 @@ class SocialAnalyzer:
             "platforms_ok": [],
             "missing": [],
         }
+        if verdict.get("tags"):
+            block["tags"] = list(verdict["tags"])
         if verdict["relevance"] == "none":
+            # The pulse was deliberately not collected (unrelated category).
+            # Recorded as missing so no surface implies social data exists.
+            block["missing"] = ["skipped: not a social-outcome category"]
             return block
         if not bool(getattr(self.settings, "SOCIAL_ENABLED", True)):
             block["missing"] = ["disabled"]

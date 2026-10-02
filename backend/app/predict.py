@@ -239,6 +239,90 @@ def book_features(book: dict, levels: int) -> dict:
     return out
 
 
+def price_history_features(
+    history: list[dict],
+    *,
+    now_ts: float | None = None,
+    change_1h_sec: int = 3600,
+    change_24h_sec: int = 86400,
+) -> dict:
+    """Deterministic 1h/24h change + realized volatility from ``/prices-history``.
+
+    The history is the CLOB ``/prices-history`` payload — points shaped
+    ``{"t": epoch_seconds, "p": price}`` — keyed by the YES token id, so the
+    prices are already market-implied P(YES) (no mirroring). The predictor
+    previously derived momentum *only* from the trade tape; this is the same
+    question asked of the price series instead.
+
+    All three features are **model features, not vetoes**: they ride in the
+    snapshot and can inform direction, but they never set abstention — that
+    stays edge-based (``PREDICT_ABSTAIN_EDGE``). Keys are omitted when the
+    history is too short to compute them (never guessed).
+
+    Args:
+        history: CLOB price-history points (any order).
+        now_ts: Optional "now" epoch seconds (tests). Defaults to the newest
+            point in the series, so a stale history still measures the move
+            *within* the series instead of comparing against wall-clock.
+        change_1h_sec: Lookback for the 1h change.
+        change_24h_sec: Lookback for the 24h change.
+
+    Returns:
+        ``{"last", "change_1h", "change_24h", "realized_vol"}``, each key
+        present only when computable; an empty dict for an unusable history.
+    """
+    points: list[tuple[float, float]] = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        ts = _float(_first(item, ("t", "timestamp", "time")))
+        price = _float(_first(item, ("p", "price")))
+        if ts is None or price is None:
+            continue
+        if not 0.0 < price < 1.0:
+            continue
+        points.append((ts, price))
+    if not points:
+        return {}
+    points.sort(key=lambda pair: pair[0])
+    last_ts, last_price = points[-1]
+    reference = now_ts if now_ts is not None else last_ts
+    out: dict = {"last": _round(last_price, 6), "points": len(points)}
+
+    def _at_or_before(cutoff: float) -> tuple[float, float] | None:
+        """Newest ``(ts, price)`` at or before ``cutoff``.
+
+        Returns None when the series is younger than the cutoff, and the
+        caller additionally requires the point to be **strictly older** than
+        the last one — otherwise a single-point series would report a fake
+        "no change" instead of an honest unknown.
+        """
+        picked: tuple[float, float] | None = None
+        for ts, price in points:
+            if ts <= cutoff:
+                picked = (ts, price)
+            else:
+                break
+        return picked
+
+    for label, lookback in (
+        ("change_1h", change_1h_sec),
+        ("change_24h", change_24h_sec),
+    ):
+        prior = _at_or_before(reference - lookback)
+        if prior is not None and prior[0] < last_ts and prior[1] > 0.0:
+            out[label] = _round(last_price - prior[1], 6)
+
+    recent = [
+        price for ts, price in points if reference - change_24h_sec <= ts <= reference
+    ]
+    if len(recent) >= 3:
+        mean = sum(recent) / len(recent)
+        variance = sum((price - mean) ** 2 for price in recent) / (len(recent) - 1)
+        out["realized_vol"] = _round(variance**0.5, 6)
+    return out
+
+
 def _window(rows: list[tuple[float, float, str]], now: float) -> dict:
     """VWAP/USD statistics for a set of ``(ts, usd, side)`` trade rows."""
     size_price = sum(usd for _, usd, _ in rows)
@@ -370,7 +454,7 @@ def build_snapshot_text(
     Args:
         question: Market question.
         market_mid: CLOB midpoint (the market-implied base rate).
-        features: Book/tape/social features.
+        features: Book/tape/price-history/social features.
         missing: Names of unavailable feature sources.
 
     Returns:
@@ -401,6 +485,17 @@ def build_snapshot_text(
             momentum_bits.append(f"volume_accel {tape['volume_accel']}x")
         if momentum_bits:
             lines.append("Momentum: " + " · ".join(momentum_bits))
+    history = features.get("price_history")
+    if isinstance(history, dict) and history:
+        bits = []
+        if "change_1h" in history:
+            bits.append(f"1h {history['change_1h']:+.4f}")
+        if "change_24h" in history:
+            bits.append(f"24h {history['change_24h']:+.4f}")
+        if "realized_vol" in history:
+            bits.append(f"realized_vol {history['realized_vol']:.4f}")
+        if bits:
+            lines.append("Price history: " + " · ".join(bits))
     if "hours_to_resolution" in features:
         line = f"Resolution in {features['hours_to_resolution']}h"
         if "volume24hr_usd" in features:
@@ -492,6 +587,20 @@ def build_reasons(
         if "volume_accel" in tape:
             reasons.append(
                 f"volume_accel {tape['volume_accel']}x (last 15m vs prior 2h rate)"
+            )
+    history = features.get("price_history")
+    if isinstance(history, dict):
+        if "change_24h" in history:
+            reasons.append(
+                f"price_history_24h {history['change_24h']:+.4f} "
+                "(CLOB /prices-history, feature not veto)"
+            )
+        if "change_1h" in history:
+            reasons.append(f"price_history_1h {history['change_1h']:+.4f}")
+        if "realized_vol" in history:
+            reasons.append(
+                f"realized_vol {history['realized_vol']:.4f} over 24h "
+                "(CLOB /prices-history)"
             )
     social = features.get("social")
     if isinstance(social, dict) and social.get("platforms_ok"):
@@ -853,14 +962,47 @@ class PredictService:
         missing: list[str] = []
 
         limit = int(getattr(self.settings, "PREDICT_TAPE_LIMIT", 100) or 100)
+        # Prefer filter_type=CASH (documented USD-denominated rows); fall back
+        # to the plain TOKENS shape if CASH is rejected. **Live-checked
+        # 2026-10-02: the condition shape accepts CASH but does not honor it**
+        # — CASH and TOKENS rows came back byte-identical, `size` still in
+        # shares — so USD is and stays `size × price`, and the basis actually
+        # used is recorded with the features instead of implied.
+        rows: list[dict] | None = None
         try:
-            rows = data_api.get_trades_v2(condition=condition_id, limit=limit) or []
-            features["tape"] = tape_features(
-                rows, yes_token_id=tokens[0] if tokens else None
+            rows = data_api.get_trades_v2(
+                condition=condition_id, limit=limit, filter_type="CASH"
             )
-        except DataApiError as exc:
-            self.audit.record("stage_error", {"stage": "data-api.trades", "error": str(exc)})
-            missing.append("tape")
+        except DataApiError:
+            rows = None  # CASH rejected: fall through to the plain shape
+        if rows is None:
+            try:
+                rows = data_api.get_trades_v2(condition=condition_id, limit=limit)
+            except DataApiError as exc:
+                self.audit.record(
+                    "stage_error", {"stage": "data-api.trades", "error": str(exc)}
+                )
+                missing.append("tape")
+        if rows is not None:
+            # /v2/trades interleaves both outcomes; the tape is the YES token's
+            # flow only (live-checked 2026-10-01 — see API_INVENTORY.md).
+            features["tape"] = tape_features(
+                rows or [], yes_token_id=tokens[0] if tokens else None
+            )
+            features["tape"]["usd_basis"] = "size_x_price"
+
+        try:
+            history = clob.get_prices_history(tokens[0], interval="1h") or []
+            history_features = price_history_features(history)
+            if history_features:
+                features["price_history"] = history_features
+            else:
+                missing.append("price_history")
+        except Exception as exc:  # noqa: BLE001 - a feature source, never fatal
+            self.audit.record(
+                "stage_error", {"stage": "clob.prices-history", "error": str(exc)}
+            )
+            missing.append("price_history")
 
         volume = volume24hr_usd(market)
         if volume is not None:

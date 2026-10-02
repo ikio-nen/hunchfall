@@ -136,6 +136,7 @@ class FakeClob:
         settings: Settings,
         book: dict | None = None,
         fail: bool = False,
+        history: list[dict] | None = None,
     ) -> None:
         self.settings = settings
         # REAL shape and order (live-checked 2026-10-01): level OBJECTS with
@@ -162,6 +163,7 @@ class FakeClob:
         )
         self.fail = fail
         self.token_ids: list[str] = []
+        self.history = history
 
     def get_orderbook(self, token_id: str) -> dict:
         self.token_ids.append(token_id)
@@ -176,6 +178,32 @@ class FakeClob:
         if not bids or not asks:
             raise RuntimeError("empty book")
         return (bids[0][0] + asks[0][0]) / 2.0
+
+    def get_midpoints(self, token_ids: list[str]) -> dict[str, float]:
+        """Batch mids: one per token, or empty when this fake is failing."""
+        if self.fail:
+            return {}
+        return {str(t): self.get_mid_price(str(t)) for t in token_ids}
+
+    def get_prices(self, token_ids: list[str], side: str = "BUY") -> dict[str, float]:
+        """Batch prices: mirror of the mid (the fake book is symmetric)."""
+        return self.get_midpoints(token_ids)
+
+    def get_prices_history(
+        self, token_id: str, **kwargs: Any
+    ) -> list[dict]:
+        """Canned history (overridable via the ``history`` kwarg).
+
+        Default is a flat 24-point hourly series at the book mid, so the
+        price-history features are computable but move-free.
+        """
+        if self.fail:
+            raise RuntimeError("clob down")
+        if self.history is not None:
+            return [dict(p) for p in self.history]
+        mid = self.get_mid_price(token_id)
+        now = int(datetime.now(timezone.utc).timestamp())
+        return [{"t": now - 3600 * i, "p": mid} for i in range(24, 0, -1)]
 
     def close(self) -> None:
         pass
@@ -316,11 +344,34 @@ class FakeTradesApi:
         self.fail = fail
         self.calls: list[dict] = []
 
-    def get_trades_v2(self, condition: str, limit: int = 100, cursor=None) -> list[dict]:
+    def get_trades_v2(
+        self, condition: str, limit: int = 100, cursor=None, **kwargs: Any
+    ) -> list[dict]:
         self.calls.append({"condition": condition, "limit": limit})
         if self.fail:
             raise DataApiError("data-api down")
         return [dict(item) for item in self.items]
+
+    def get_trades_v2_many(
+        self, conditions: list[str], limit: int = 100
+    ) -> dict[str, list[dict]]:
+        """Batched tape: one call, rows split by their own ``condition_id``.
+
+        Mirrors the real client's contract: every requested id is a key, a row
+        is filed under its own ``condition_id``, and unrequested rows are
+        dropped.
+        """
+        wanted = [str(c) for c in conditions if str(c)]
+        self.calls.append({"condition": ",".join(wanted), "limit": limit})
+        if self.fail:
+            raise DataApiError("data-api down")
+        out: dict[str, list[dict]] = {c: [] for c in wanted}
+        allowed = set(wanted)
+        for item in self.items:
+            key = str(item.get("condition_id") or "")
+            if key in allowed:
+                out[key].append(dict(item))
+        return out
 
     def close(self) -> None:
         pass

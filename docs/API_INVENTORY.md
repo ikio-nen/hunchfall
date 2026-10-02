@@ -37,6 +37,10 @@ Gotchas (verified):
 - Resolved markets may report `outcomePrices` as `["0","0"]` — **validate winner
   fields before trusting**; the loop treats zeroed prices with no confirmed
   winner as a broken feed (veto `negrisk_sum_invalid`), never as a signal.
+- **`include_tag=true`** attaches the market's `tags` array (live-checked
+  2026-10-02): `[{"id", "label", "slug", ...}]`. The social analyzer uses it
+  to route only social-outcome categories to the full pulse — see
+  `app/social.py` (`_SOCIAL_TAG_SLUGS`).
 
 ## CLOB API — market data only (base `https://clob.polymarket.com`)
 
@@ -46,11 +50,31 @@ Gotchas (verified):
 | `/midpoint?token_id=X` | GET | No (public) | 1500 req / 10s | mid price per token | verified |
 | `/book?token_id=X` | GET | No (public) | 1500 req / 10s | order book (incl. `min_order_size`, `tick_size`, `last_trade_price`); spread, depth, book-walk levels | verified |
 | `/spread?token_id=X` | GET | No (public) | 1500 req / 10s | spread payload | verified |
-| `/prices-history` | GET | No (public) | 1000 req / 10s | price history per token | verified |
+| `/prices-history` | GET | No (public) | 1000 req / 10s | price history per token (query key is **`market`** — see below) | verified |
 | `/tick-size?token_id=X` | GET | No (public) | 1500 req / 10s | min price increment | verified |
-| `/books`, `/prices`, `/midpoints` (batched) | GET | No (public) | 500 req / 10s | batched market data | verified |
+| `/books`, `/prices`, `/midpoints` (batched) | GET | No (public) | 500 req / 10s | batched market data — **NOT USABLE on this deployment** (see below); per-token fallback | live-checked 2026-10-02 |
 
 General CLOB limit: 9000 req / 10s.
+
+CLOB gotchas (live-checked 2026-10-02):
+
+- **`/prices-history` takes `market=<asset id>`, not `token_id=`.** Sending
+  `token_id=` returns HTTP 200 with a **well-formed empty `history` array**,
+  which is why the predictor silently had no price history. `market=` returns
+  points shaped `{"t": epoch_seconds, "p": price}`; `interval` accepts
+  `max|all|1m|1w|1d|6h|1h`, `fidelity` is in minutes.
+- **`/midpoint` returns `{"mid": "0.0255"}`** — the key is `mid`, not
+  `midpoint`; the old parser read `float(None)` and raised on every real call.
+- **The batch endpoints are dead on this deployment.** `/midpoints`,
+  `/prices`, and `/books` return `{"error": "Invalid payload"}` for *every*
+  input — single ids, comma lists, the docs' own `0xabc123,0xdef456` example,
+  and the POST body form. `ClobClient.get_midpoints` / `get_prices` therefore
+  try the batch once and fall back to per-token `/midpoint` / `/price` calls
+  (which work); callers get the same result either way and the batch is only
+  ever a latency optimization.
+- **CLOB error bodies carry `trace_id` and a `retryable` flag** (same schema
+  as Data API v2); the client logs the trace id on failure and does not retry
+  a `retryable: false` response.
 
 ## Data API (base `https://data-api.polymarket.com`)
 
@@ -79,18 +103,17 @@ camelCase; `429` carries `Retry-After`; a documented miss returns an empty
 | `/v2/activity` | `user` (required, EVM address); `type` (comma-separated, e.g. `TRADE`; `TIP` opt-in only); `condition` (≤20 ids; aliases `condition_id`/`conditionId`); `event_id` (≤20, mutually exclusive with `condition`); `side`; `start`/`end` (epoch s); `limit` (default 100, max 1000); `cursor`; `sort_direction`; `exclude_deposits_withdrawals` (default true) | extension-scan trade tape (`type=TRADE&condition=`) + wallet activity feed (`user`) | verified |
 | `/v2/positions` | `user`; `status` (`OPEN`/`CLOSED`); `limit`; `cursor` | watch-only wallet open positions | verified |
 
-Note: `/v2/trades` query params were **live-verified 2026-10-01**
-(`condition` + `limit`; see below). A non-proxy-wallet `user` on `/v2/activity`
+Note: `/v2/activity?type=TRADE` stays the RFC-001 extension-scan tape; the
+RFC-003 predictor uses `/v2/trades` (below). A non-proxy-wallet `user`
 returns an empty `data` array; treat as "no activity", not an error.
 
-### `/v2/trades` — RFC-003 predictor tape (live-verified 2026-10-01)
+### `/v2/trades` — RFC-003 predictor tape (live-checked 2026-10-02)
 
 The RFC-003 predictor adopts `/v2/trades?condition=<condition_id>&limit=N`
 (per-trade price/size/side/timestamp are needed for VWAP + momentum), where
 **USD notional per trade is `size × price`** — the rows carry **no
-`usdc_size`**. If `usdc_size` ever appears on these rows it is ignored; the
-formula is pinned by a unit test. `/v2/activity?type=TRADE` stays the
-RFC-001 extension-scan tape and is untouched.
+`usdc_size`**. `/v2/activity?type=TRADE` stays the RFC-001 extension-scan
+tape and is untouched.
 
 **Live-check result: VERIFIED (2026-10-01, via the documented read-only fetch
 proxy — direct egress to every Polymarket host still times out on the build
@@ -115,6 +138,23 @@ Field confirmations, and the bugs the check found:
 * The same live pass found three more shape bugs in the read path
   (`clobTokenIds` is a JSON-array string; `/book` levels are objects with
   string numbers served **worst-first**) — see `docs/PLAYTESTING.md` §7.4.
+
+Batch and filter findings (live-checked 2026-10-02):
+
+- **`condition` accepts up to 20 distinct comma-separated ids in one call**,
+  and a two-id batch returned interleaved rows for both markets. The
+  predictor/loop path uses `get_trades_v2_many`, which splits rows by their
+  own `condition_id` client-side (and drops any row whose id was not
+  requested).
+- **`filter_type=CASH` is accepted but ignored on the `condition` shape** —
+  20/20 CASH rows came back byte-identical to TOKENS rows, with `size` still
+  in shares. The predictor asks for CASH first and falls back to the plain
+  shape if it is rejected, but USD is always `size × price`; the basis
+  actually used is recorded per prediction (`tape.usd_basis`).
+- **Errors carry `code`, `error`, `retryable`, and `trace_id`** (plus an
+  `x-trace-id` header). The client logs the trace id on upstream failures and
+  only retries when `retryable` is true — or when the body carries no flag,
+  which keeps the old status-based retry on 429/503 with `Retry-After`.
 
 ## hunchfall backend routes — RFC-001 additions (2026-09-30)
 

@@ -291,12 +291,91 @@ def _trade_ts(trade: dict) -> float | None:
     return None
 
 
+def _latest_trade_ts(rows: list[dict]) -> str:
+    """ISO-8601 UTC timestamp of the newest row, or "" when none is readable.
+
+    Args:
+        rows: Data API v2 trade rows (any order).
+
+    Returns:
+        ISO-8601 UTC string, or "" (honest empty, never a guess).
+    """
+    latest: float | None = None
+    for trade in rows or []:
+        ts = _trade_ts(trade)
+        if ts is not None and (latest is None or ts > latest):
+            latest = ts
+    if latest is None:
+        return ""
+    return datetime.fromtimestamp(latest, tz=timezone.utc).isoformat()
+
+
+def _snapshots(
+    clob: ClobClient,
+    data_api: DataApiClient,
+    candidates: list[dict],
+    audit: AuditLog,
+) -> dict[str, dict]:
+    """Compose snapshots for many candidate markets with **one** tape call.
+
+    The Data API accepts up to 20 comma-separated condition ids in a single
+    ``/v2/trades`` request (live-checked 2026-10-02), so a cycle with several
+    candidates no longer pays one tape round-trip per market. Books stay
+    per-token (the CLOB batch endpoints are not usable on this deployment —
+    see ``ClobClient.get_midpoints``).
+
+    A candidate whose book is unusable is simply absent from the result, and a
+    tape failure degrades every ``last_trade_ts`` to "" (the tape is
+    informational and never fails a snapshot).
+
+    Args:
+        clob: CLOB market-data client.
+        data_api: Data API client (v2 only — v1 retired 2026-10-24).
+        candidates: ``[{"market_id", "token_id"}, ...]``; duplicates collapse.
+        audit: Append-only audit log.
+
+    Returns:
+        ``{market_id: snapshot}`` for the candidates that produced one.
+    """
+    by_market: dict[str, str] = {}
+    for cand in candidates or []:
+        market_id = str(cand.get("market_id") or "")
+        token_id = str(cand.get("token_id") or "")
+        if market_id and token_id and market_id not in by_market:
+            by_market[market_id] = token_id
+    if not by_market:
+        return {}
+
+    tapes: dict[str, list[dict]] = {}
+    try:
+        tapes = data_api.get_trades_v2_many(list(by_market.keys()), limit=5)
+    except Exception as exc:  # noqa: BLE001 - the tape is informational here
+        audit.record("stage_error", {"stage": "data-api.trades.batch", "error": str(exc)})
+        tapes = {}
+
+    out: dict[str, dict] = {}
+    for market_id, token_id in by_market.items():
+        snap = _snapshot(
+            clob,
+            data_api,
+            market_id,
+            token_id,
+            audit,
+            trade_ts=_latest_trade_ts(tapes.get(market_id, [])),
+        )
+        if snap is not None:
+            out[market_id] = snap
+    return out
+
+
 def _snapshot(
     clob: ClobClient,
     data_api: DataApiClient,
     market_id: str,
     token_id: str,
     audit: AuditLog,
+    *,
+    trade_ts: str | None = None,
 ) -> dict | None:
     """Compose the gate's price snapshot from CLOB + Data API primitives.
 
@@ -315,6 +394,8 @@ def _snapshot(
             ``condition`` filter takes (a token id is NOT accepted).
         token_id: YES CLOB token id (used for the order book).
         audit: Append-only audit log.
+        trade_ts: Pre-computed ``last_trade_ts`` (batched path); None makes
+            this call fetch the tape itself.
     """
     try:
         book = clob.get_orderbook(token_id) or {}
@@ -329,20 +410,16 @@ def _snapshot(
         mid = (best_bid_p + best_ask_p) / 2.0
         spread_cents = (best_ask_p - best_bid_p) * 100.0
         top_depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s
-        try:
-            trades = data_api.get_trades_v2(condition=market_id, limit=5) or []
-        except Exception:  # noqa: BLE001 - tape is informational here
-            trades = []
-        latest: float | None = None
-        for t in trades:
-            ts = _trade_ts(t)
-            if ts is not None and (latest is None or ts > latest):
-                latest = ts
-        last_trade_ts = (
-            datetime.fromtimestamp(latest, tz=timezone.utc).isoformat()
-            if latest is not None
-            else ""
-        )
+        if trade_ts is None:
+            # Single-market path: one tape call for this condition.
+            try:
+                trades = data_api.get_trades_v2(condition=market_id, limit=5) or []
+            except Exception:  # noqa: BLE001 - tape is informational here
+                trades = []
+            last_trade_ts = _latest_trade_ts(trades)
+        else:
+            # Batched path: the caller already fetched this market's rows.
+            last_trade_ts = trade_ts
     except Exception as exc:  # noqa: BLE001 - tolerated, recorded
         audit.record("stage_error", {"stage": "clob.snapshot", "error": str(exc)})
         return None
@@ -418,7 +495,14 @@ def _apply_fill(positions: list[dict], fill, question: str) -> list[dict]:
 
 
 def _mark_positions(clob: ClobClient, positions: list[dict]) -> list[dict]:
-    """Re-mark every position to the current token price (NO = 1 - YES mid)."""
+    """Re-mark every position to the current token price (NO = 1 - YES mid).
+
+    Multi-token price fetch: one batched ``get_midpoints`` call covers every
+    position token, falling back per token inside the client when the batch
+    endpoints are unavailable (they are, on this deployment — see
+    ``ClobClient.get_midpoints``). A token the batch did not cover is fetched
+    individually; only a token that fails both ways keeps its last mark.
+    """
     by_key = {(p["market_id"], p["token_id"], p["side"]): p for p in positions}
     objs = [
         Position(
@@ -432,13 +516,19 @@ def _mark_positions(clob: ClobClient, positions: list[dict]) -> list[dict]:
         )
         for p in positions
     ]
+    try:
+        mids = clob.get_midpoints([p["token_id"] for p in positions]) or {}
+    except Exception:  # noqa: BLE001 - per-token fallback below
+        mids = {}
 
     def price_fn(market_id: str, token_id: str, side: str) -> float:
-        try:
-            mid = float(clob.get_mid_price(token_id))
-            return mid if side == "YES" else 1.0 - mid
-        except Exception:  # noqa: BLE001 - keep last mark on failure
-            return by_key[(market_id, token_id, side)]["avg_price"]
+        mid = mids.get(str(token_id))
+        if mid is None:
+            try:
+                mid = float(clob.get_mid_price(token_id))
+            except Exception:  # noqa: BLE001 - keep last mark on failure
+                return by_key[(market_id, token_id, side)]["avg_price"]
+        return mid if side == "YES" else 1.0 - mid
 
     marked = mark_to_market(objs, price_fn)
     return [
@@ -530,6 +620,10 @@ def run_once(settings: Settings) -> dict:
         jev = JevClient(settings)
 
     try:
+        # Match every story first, then take all snapshots in one pass so the
+        # tape costs one batched /v2/trades call per cycle instead of one per
+        # candidate (the books stay per-token — see _snapshots).
+        planned: list[tuple[Story, str, dict]] = []
         for story in stories[:MAX_STORIES_PER_CYCLE]:
             try:
                 summary = summarize(story)
@@ -542,9 +636,23 @@ def run_once(settings: Settings) -> dict:
             picked = _pick_market(gamma, story, audit)
             if picked is None:
                 continue
-            snap = _snapshot(
-                clob, data_api, picked["market_id"], picked["token_id"], audit
-            )
+            planned.append((story, summary, picked))
+
+        snapshots = _snapshots(
+            clob,
+            data_api,
+            [
+                {
+                    "market_id": picked["market_id"],
+                    "token_id": picked["token_id"],
+                }
+                for _, _, picked in planned
+            ],
+            audit,
+        )
+
+        for story, summary, picked in planned:
+            snap = snapshots.get(str(picked["market_id"]))
             if snap is None:
                 continue
 

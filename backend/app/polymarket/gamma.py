@@ -238,10 +238,11 @@ class GammaClient:
         """
         return self._get(f"/events/slug/{slug}")
 
-    def get_market(self, market_id: str) -> dict:
+    def get_market(self, market_id: str, include_tags: bool = True) -> dict:
         """Fetch one market by its *numeric* Gamma market id.
 
-        GET /markets/{id} — rate limit 300/10s.
+        GET /markets/{id} — rate limit 300/10s. ``include_tag=true`` attaches
+        the ``tags`` array (see ``get_market_by_slug``).
 
         A condition id is **not** a valid ``{id}``: live-checked 2026-10-01,
         ``/markets/0x<64hex>`` answers ``{"type": "validation error",
@@ -250,11 +251,13 @@ class GammaClient:
 
         Args:
             market_id: Numeric Gamma market id, e.g. "559651".
+            include_tags: Ask Gamma for the tags array (default True).
 
         Returns:
             Market dict.
         """
-        return self._get(f"/markets/{market_id}")
+        params = {"include_tag": "true"} if include_tags else None
+        return self._get(f"/markets/{market_id}", params=params)
 
     def get_market_by_condition_id(self, condition_id: str) -> dict:
         """Resolve a raw condition id to its market (the verified path).
@@ -303,16 +306,24 @@ class GammaClient:
                     return row
         return {}
 
-    def get_market_by_slug(self, slug: str) -> dict:
+    def get_market_by_slug(self, slug: str, include_tags: bool = True) -> dict:
         """Fetch one market by slug. GET /markets/slug/{slug}.
+
+        ``include_tag=true`` attaches the market's ``tags`` array (live-checked
+        2026-10-02: ``[{"id", "label", "slug", ...}]``), which the social
+        analyzer uses to route only genuinely social-outcome markets to the
+        full social pulse. Tags are additive; a response without them still
+        parses.
 
         Args:
             slug: Market slug.
+            include_tags: Ask Gamma for the tags array (default True).
 
         Returns:
             Market dict.
         """
-        return self._get(f"/markets/slug/{slug}")
+        params = {"include_tag": "true"} if include_tags else None
+        return self._get(f"/markets/slug/{slug}", params=params)
 
     def list_markets(
         self, limit: int = 100, after_cursor: str | None = None
