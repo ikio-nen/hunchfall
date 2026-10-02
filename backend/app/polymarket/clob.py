@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 
 from app.config import Settings
+from app.polymarket.shim import ShimError, shim_fallback
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +209,19 @@ class ClobClient:
             except ClobError:
                 raise
             except httpx.HTTPError as exc:
+                try:
+                    shim_resp = shim_fallback(self.settings, "clob", path, params, exc)
+                except ShimError as shim_exc:
+                    raise ClobError(
+                        f"CLOB API request failed [{endpoint}]: {shim_exc}"
+                    ) from shim_exc
+                if shim_resp is not None:
+                    if shim_resp.status_code >= 400:
+                        raise ClobError(
+                            f"CLOB API request failed [{endpoint}] via shim: "
+                            f"HTTP {shim_resp.status_code}"
+                        ) from exc
+                    return shim_resp.json()
                 last_exc = exc
                 if attempt == _MAX_RETRIES:
                     break

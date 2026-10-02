@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     POLYMARKET_CLOB_URL: str = "https://clob.polymarket.com"
     POLYMARKET_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     POLYMARKET_DATA_API_URL: str = "https://data-api.polymarket.com"
+    # Optional loopback shim for networks that block direct Polymarket
+    # egress (see app/polymarket/shim.py and scripts/live_shim.py). Empty =
+    # disabled. When set AND ON_BLOCKED is true, a connection-level direct
+    # failure (ConnectError / ConnectTimeout only) is replayed once through
+    # the shim; HTTP errors and read timeouts never fall back.
+    POLYMARKET_SHIM_URL: str = ""
+    POLYMARKET_SHIM_ON_BLOCKED: bool = True
     GDELT_DOC_URL: str = "https://api.gdeltproject.org/api/v2/doc/doc"
 
     # ---- Jev decision model (TypeSafe hosted API) ---------------------------

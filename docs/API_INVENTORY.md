@@ -156,6 +156,21 @@ Batch and filter findings (live-checked 2026-10-02):
   only retries when `retryable` is true — or when the body carries no flag,
   which keeps the old status-based retry on 429/503 with `Retry-After`.
 
+## Blocked networks — optional loopback shim (live-checked 2026-10-02)
+
+This build machine cannot open direct TCP connections to gamma-api / clob /
+data-api.polymarket.com (all requests time out). `backend/scripts/live_shim.py`
+serves the three APIs on loopback through the documented read-only fetch
+proxy (`r.jina.ai`), GET only, unwrapping the proxy's `Markdown Content:`
+envelope. `app/polymarket/shim.py` adds a gated fallback to every read
+client: direct is always tried first, and only a connection-level failure
+(`ConnectError` / `ConnectTimeout`) may be replayed **exactly once** through
+`POLYMARKET_SHIM_URL`; HTTP status errors and read timeouts never fall back,
+and a shim failure raises with both errors named. The fallback is off unless
+`POLYMARKET_SHIM_URL` is set and `POLYMARKET_SHIM_ON_BLOCKED=true`. Point the
+three `POLYMARKET_*_URL` settings at the shim mounts for a direct route, or
+leave them on the real hosts and let the fallback find the shim.
+
 ## hunchfall backend routes — RFC-001 additions (2026-09-30)
 
 | Route | Method | Purpose |

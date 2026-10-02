@@ -52,6 +52,7 @@ from collections.abc import Iterator
 import httpx
 
 from app.config import Settings
+from app.polymarket.shim import ShimError, shim_fallback
 
 log = logging.getLogger(__name__)
 
@@ -195,7 +196,22 @@ class GammaClient:
             resp = self._http.get(path, params=params)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            raise GammaError(f"Gamma API request failed [{endpoint}]: {exc}") from exc
+            try:
+                shim_resp = shim_fallback(self.settings, "gamma", path, params, exc)
+            except ShimError as shim_exc:
+                raise GammaError(
+                    f"Gamma API request failed [{endpoint}]: {shim_exc}"
+                ) from shim_exc
+            if shim_resp is None:
+                raise GammaError(
+                    f"Gamma API request failed [{endpoint}]: {exc}"
+                ) from exc
+            if shim_resp.status_code >= 400:
+                raise GammaError(
+                    f"Gamma API request failed [{endpoint}] via shim: "
+                    f"HTTP {shim_resp.status_code}"
+                ) from exc
+            return shim_resp.json()
         return resp.json()
 
     # ---- verified read endpoints -----------------------------------------
