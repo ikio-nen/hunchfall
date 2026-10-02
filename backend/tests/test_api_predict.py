@@ -214,6 +214,85 @@ def test_predict_empty_book_is_502_and_persists_nothing(tmp_path, monkeypatch):
     assert audit.query("stage_error")
 
 
+def test_one_sided_book_abstains_instead_of_failing(tmp_path, monkeypatch):
+    """A bids-only book (normal near resolution) yields an honest abstention.
+
+    Live-checked 2026-10-02 on the near-resolution BTC market: YES bids only,
+    asks []. The predictor used to 502 the whole request; it now keeps the
+    available side, resolves the mid via /midpoint, and abstains on data
+    quality — a logged prediction, never a guess.
+    """
+    one_sided = {
+        "bids": [[0.99, 1000.0]],
+        "asks": [],
+        "last_trade_price": "0.995",
+    }
+    client, settings = _client(
+        tmp_path,
+        monkeypatch,
+        clob=lambda s: FakeClob(s, book=one_sided, midpoint=0.998),
+    )
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    feats = body["snapshot"]["features"]
+    assert feats["one_sided"] == "ask"
+    assert feats["best_bid"] == 0.99
+    assert feats["bid_depth_usd"] == 990.0
+    assert "imbalance" not in feats
+    assert feats["market_mid"] == 0.998
+    assert feats["mid_source"] == "midpoint"
+    assert body["snapshot"]["missing"] == ["book_ask"]
+
+    prediction = body["prediction"]
+    assert prediction["abstained"] is True
+    assert prediction["direction"] == "ABSTAIN"
+    assert prediction["p_yes"] == 0.8  # ensemble still ran
+    assert prediction["edge_vs_market"] == -0.198  # computed, then overridden
+    assert any(
+        "abstained: one-sided book (no ask side) — data-quality abstention "
+        "(mid 0.998 via /midpoint)" == reason
+        for reason in prediction["reasons"]
+    )
+    # an abstention is still logged (honesty), never a guess
+    assert len(_audit(settings).predictions()) == 1
+
+
+def test_one_sided_book_falls_back_to_last_trade_price(tmp_path, monkeypatch):
+    """When /midpoint fails too, the last traded price is the anchor."""
+    one_sided = {"bids": [[0.90, 500.0]], "asks": [], "last_trade_price": "0.91"}
+    client, _ = _client(
+        tmp_path,
+        monkeypatch,
+        clob=lambda s: FakeClob(s, book=one_sided, midpoint_fail=True),
+    )
+    body = client.post("/predict", json=predict_body()).json()
+    feats = body["snapshot"]["features"]
+    assert feats["market_mid"] == 0.91
+    assert feats["mid_source"] == "last_trade"
+    assert body["prediction"]["abstained"] is True
+    assert any("via /last_trade" in reason for reason in body["prediction"]["reasons"])
+
+
+def test_one_sided_book_with_no_defensible_mid_is_502(tmp_path, monkeypatch):
+    """No /midpoint and no last trade -> fail closed, never guess."""
+    one_sided = {"bids": [[0.90, 500.0]], "asks": []}
+    client, settings = _client(
+        tmp_path,
+        monkeypatch,
+        clob=lambda s: FakeClob(s, book=one_sided, midpoint_fail=True),
+    )
+    resp = client.post("/predict", json=predict_body())
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["code"] == "upstream_error"
+    assert detail["source"] == "clob"
+    audit = _audit(settings)
+    assert audit.predictions() == []
+    assert audit.query("stage_error")
+
+
 def test_predict_requires_exactly_one_identifier(tmp_path, monkeypatch):
     client, _ = _client(tmp_path, monkeypatch)
     assert client.post("/predict", json={}).status_code == 422
@@ -269,6 +348,23 @@ def test_demo_live_path_uses_real_upstreams(tmp_path, monkeypatch):
     body = client.get("/predict/demo").json()
     assert body["snapshot_source"] == "live"
     assert _audit(settings).predictions() == []  # demo never writes the ledger
+
+
+def test_demo_live_one_sided_book_abstains(tmp_path, monkeypatch):
+    """The demo path uses the same data-quality abstention and never persists."""
+    client, settings = _client(
+        tmp_path,
+        monkeypatch,
+        PREDICT_DEMO_LIVE=True,
+        clob=lambda s: FakeClob(
+            s, book={"bids": [[0.99, 100.0]], "asks": []}, midpoint=0.998
+        ),
+    )
+    body = client.get("/predict/demo").json()
+    assert body["snapshot_source"] == "live"
+    assert body["prediction"]["abstained"] is True
+    assert body["prediction"]["direction"] == "ABSTAIN"
+    assert _audit(settings).predictions() == []
 
 
 def test_demo_falls_back_to_canned_when_upstreams_fail(tmp_path, monkeypatch):

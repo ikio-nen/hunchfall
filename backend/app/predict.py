@@ -204,35 +204,57 @@ def book_features(book: dict, levels: int) -> dict:
     descending, so index 0 is the WORST quote (live-checked 2026-10-01 —
     reading it gave a 50.0¢ mid for a 2.85¢ market).
 
+    A genuinely empty book is a required-input failure (502). A **one-sided**
+    book (one half empty — normal for a near-resolution market) is handled
+    honestly: the available side's best price and depth are kept,
+    ``imbalance``/``spread_cents``/``market_mid`` are omitted (computing them
+    would fabricate the missing side), and ``one_sided`` names the empty side
+    so the caller can abstain on data quality and resolve the mid another way.
+
     Args:
         book: CLOB ``/book`` payload.
         levels: Top-N levels per side used for depth.
 
     Returns:
-        Feature dict with the required book fields.
+        Feature dict with the required book fields; ``one_sided`` (the empty
+        side) only when one half is empty.
 
     Raises:
-        PredictUpstreamError: when a side is empty (required input).
+        PredictUpstreamError: when the book is empty (required input) or the
+            touch is unusable.
     """
     bids, asks = book_levels(book if isinstance(book, dict) else {}, levels)
-    if not bids or not asks:
+    if not bids and not asks:
         raise PredictUpstreamError("CLOB order book empty", source="clob")
-    best_bid = bids[0][0]
-    best_ask = asks[0][0]
-    if best_bid <= 0.0 or best_ask <= 0.0:
-        raise PredictUpstreamError("CLOB book has no usable touch", source="clob")
+    one_sided = "ask" if not asks else ("bid" if not bids else None)
+    out: dict = {}
     bid_depth = sum(price * size for price, size in bids)
     ask_depth = sum(price * size for price, size in asks)
-    total = bid_depth + ask_depth
-    out: dict = {
-        "market_mid": _round((best_bid + best_ask) / 2.0, 6),
-        "best_bid": _round(best_bid, 6),
-        "best_ask": _round(best_ask, 6),
-        "spread_cents": _round((best_ask - best_bid) * 100.0, 4),
-        "bid_depth_usd": _round(bid_depth, 2),
-        "ask_depth_usd": _round(ask_depth, 2),
-        "imbalance": _round((bid_depth - ask_depth) / total, 4) if total > 0 else 0.0,
-    }
+    if bids:
+        best_bid = bids[0][0]
+        if best_bid <= 0.0:
+            raise PredictUpstreamError(
+                "CLOB book has no usable touch", source="clob"
+            )
+        out["best_bid"] = _round(best_bid, 6)
+        out["bid_depth_usd"] = _round(bid_depth, 2)
+    if asks:
+        best_ask = asks[0][0]
+        if best_ask <= 0.0:
+            raise PredictUpstreamError(
+                "CLOB book has no usable touch", source="clob"
+            )
+        out["best_ask"] = _round(best_ask, 6)
+        out["ask_depth_usd"] = _round(ask_depth, 2)
+    if one_sided is not None:
+        out["one_sided"] = one_sided
+    else:
+        total = bid_depth + ask_depth
+        out["market_mid"] = _round((bids[0][0] + asks[0][0]) / 2.0, 6)
+        out["spread_cents"] = _round((asks[0][0] - bids[0][0]) * 100.0, 4)
+        out["imbalance"] = (
+            _round((bid_depth - ask_depth) / total, 4) if total > 0 else 0.0
+        )
     last = _float(book.get("last_trade_price"))
     if last is not None:
         out["last_trade_price"] = _round(last, 6)
@@ -461,7 +483,18 @@ def build_snapshot_text(
         Compact multi-line text.
     """
     lines = [f"Market: {question}", f"Market-implied base rate (YES mid): {market_mid:.3f}"]
-    if "best_bid" in features:
+    if features.get("one_sided"):
+        depth_bits = [
+            f"${features[key]} {name}"
+            for key, name in (("bid_depth_usd", "bid"), ("ask_depth_usd", "ask"))
+            if key in features
+        ]
+        lines.append(
+            f"Book: one-sided ({features['one_sided']} side empty) · "
+            f"mid {features.get('market_mid')} via /{features.get('mid_source')}"
+            + (f" · depth {' / '.join(depth_bits)}" if depth_bits else "")
+        )
+    elif "best_bid" in features:
         lines.append(
             f"Book: bid {features['best_bid']} / ask {features['best_ask']} · "
             f"spread {features.get('spread_cents')}¢ · "
@@ -555,6 +588,27 @@ def decide(
     }
 
 
+def _force_data_quality_abstention(features: dict, decision: dict) -> dict:
+    """Force ABSTAIN when the snapshot's book is one-sided (pure).
+
+    A one-sided book means the mid came from the fallback chain, not from a
+    live two-sided touch — no guess computed against it may be trusted. The
+    computed p_yes/edge/confidence stay in the payload (schema unchanged);
+    only the verdict is overridden to a data-quality abstention.
+
+    Args:
+        features: Snapshot features (read ``one_sided``).
+        decision: ``decide()`` output (mutated in place).
+
+    Returns:
+        The same decision dict, possibly forced to ABSTAIN.
+    """
+    if features.get("one_sided"):
+        decision["direction"] = "ABSTAIN"
+        decision["abstained"] = True
+    return decision
+
+
 def build_reasons(
     features: dict, decision: dict, missing: list[str], threshold: float
 ) -> list[str]:
@@ -615,7 +669,13 @@ def build_reasons(
         reasons.append(f"base_rate anchor: market-implied {features['market_mid']}")
     for name in missing:
         reasons.append(f"missing feature source: {name}")
-    if decision["abstained"]:
+    if features.get("one_sided"):
+        reasons.append(
+            f"abstained: one-sided book (no {features['one_sided']} side) — "
+            f"data-quality abstention (mid {features.get('market_mid')} via "
+            f"/{features.get('mid_source') or 'book'})"
+        )
+    elif decision["abstained"]:
         reasons.append(
             f"abstained: |edge {abs(decision['edge_vs_market'])}| < "
             f"threshold {threshold:.3f}"
@@ -960,6 +1020,15 @@ class PredictService:
             )
             raise
         missing: list[str] = []
+        if features.get("one_sided"):
+            # The book cannot provide a mid when one half is empty; resolve it
+            # through the documented fallback chain and name the missing side.
+            # This is a data-quality state, not an upstream failure.
+            features["market_mid"], mid_source = self._resolve_one_sided_mid(
+                book, tokens[0], clob
+            )
+            features["mid_source"] = mid_source
+            missing.append(f"book_{features['one_sided']}")
 
         limit = int(getattr(self.settings, "PREDICT_TAPE_LIMIT", 100) or 100)
         # Prefer filter_type=CASH (documented USD-denominated rows); fall back
@@ -1014,6 +1083,42 @@ class PredictService:
         social = self.social.analyze(market)
         features["social"] = social
         return features, missing
+
+    def _resolve_one_sided_mid(
+        self, book: dict, token_id: str, clob: ClobClient
+    ) -> tuple[float, str]:
+        """Mid for a one-sided book: ``/midpoint``, then ``last_trade_price``.
+
+        The book cannot provide a mid when one half is empty; the market's
+        own ``/midpoint`` can. When even that fails, the last traded price is
+        the only defensible anchor left, and if neither exists the prediction
+        fails closed (502) — never guessed.
+
+        Args:
+            book: CLOB ``/book`` payload.
+            token_id: YES token id.
+            clob: CLOB client.
+
+        Returns:
+            ``(mid, source)`` with source in {"midpoint", "last_trade"}.
+
+        Raises:
+            PredictUpstreamError: no defensible mid exists (fail closed).
+        """
+        try:
+            mid = float(clob.get_midpoint(token_id))
+        except Exception as exc:  # noqa: BLE001 - fall through to last trade
+            self.audit.record(
+                "stage_error", {"stage": "clob.midpoint", "error": str(exc)}
+            )
+            last = _float(book.get("last_trade_price"))
+            if last is not None and 0.0 < last < 1.0:
+                return _round(last, 6), "last_trade"
+            raise PredictUpstreamError(
+                "one-sided book and no /midpoint or last_trade_price available",
+                source="clob",
+            ) from exc
+        return _round(mid, 6), "midpoint"
 
     def _snapshot_digest(self, question: str, condition_id: str, features: dict) -> str:
         """Stable sha256 over the canonical snapshot (features + identity)."""
@@ -1161,6 +1266,7 @@ class PredictService:
                 threshold,
                 ensemble["disagreement"],
             )
+            decision = _force_data_quality_abstention(features, decision)
             reasons = build_reasons(features, decision, missing, threshold)
             model_meta = self._model_meta(ensemble["decision"], ensemble)
             digest = self._snapshot_digest(question, resolved["condition_id"], features)
@@ -1320,6 +1426,7 @@ class PredictService:
                 threshold,
                 ensemble["disagreement"],
             )
+            decision = _force_data_quality_abstention(features, decision)
             reasons = build_reasons(features, decision, missing, threshold)
             body = self._prediction_response(
                 prediction_id="demo",
