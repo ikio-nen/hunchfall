@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { width: 260px; margin: 0; padding: 14px; background: #fffbf6; color: #363532;
+         font-family: -apple-system, "Segoe UI", Inter, sans-serif; font-size: 13px; }
+  h1 { font-size: 13px; letter-spacing: 0.08em; margin: 0 0 4px; color: #b5f13c; }
+  p { color: #6b655c; font-size: 11px; margin: 0 0 10px; }
+  label { display: block; font-size: 11px; color: #6b655c; margin-bottom: 4px; }
+  input { width: 100%; box-sizing: border-box; background: #ffffff; border: 1px solid #e2dbce;
+          color: #363532; border-radius: 8px; padding: 8px; font-size: 12px; margin-bottom: 10px; }
+  button { width: 100%; background: #363532; color: #fffbf6; border: none; border-radius: 8px;
+           padding: 8px; font-weight: 700; cursor: pointer; }
+  .mp { margin-top: 12px; border-top: 1px solid #e2dbce; padding-top: 10px; }
+  .mp-row { display: flex; justify-content: space-between; font-size: 12px; padding: 3px 0; }
+  .dot { color: #1db927; }
+  #status { font-size: 11px; color: #6b655c; margin-top: 8px; min-height: 14px; }
+</style>
+</head>
+<body>
+  <h1>HUNCHFALL</h1>
+  <p>Page scanner · paper predictions only.<br/>No trades are ever placed.</p>
+
+  <label for="backend">Backend URL</label>
+  <input id="backend" placeholder="http://localhost:8000" />
+  <button id="save">Save</button>
+  <div id="status"></div>
+
+  <div class="mp">
+    <label>Your marketplaces</label>
+    <div class="mp-row"><span><span class="dot">●</span> Polymarket</span><span>active</span></div>
+    <div class="mp-row" style="color:#9aa0a6"><span>○ Kalshi</span><span>soon</span></div>
+  </div>
+
+<script>
+  const input = document.getElementById("backend");
+  const status = document.getElementById("status");
+  chrome.storage.sync.get({ backendUrl: "http://localhost:8000" }, (d) => {
+    input.value = d.backendUrl;
+  });
+  document.getElementById("save").onclick = () => {
+    const v = input.value.trim().replace(/\/+$/, "") || "http://localhost:8000";
+    chrome.storage.sync.set({ backendUrl: v }, () => {
+      status.textContent = "Saved.";
+      setTimeout(() => (status.textContent = ""), 1500);
+    });
+  };
+</script>
+</body>
+</html>
