@@ -96,13 +96,27 @@ def test_compare_no_bets():
 
 def test_samples_load_and_roundtrip(tmp_path):
     examples = load_jsonl(SAMPLES)
-    assert len(examples) == 5
-    assert all(e.label == "SAMPLE" for e in examples)
-    assert all(e.source == "synthetic-hand-written" for e in examples)
-    outcomes = {e.outcome for e in examples}
-    assert outcomes == {"YES", "NO"}
-    # every example is clearly synthetic
-    assert all("SYNTHETIC" in e.news_snapshot for e in examples)
+    samples = [e for e in examples if e.label == "SAMPLE"]
+    real = [e for e in examples if e.label == "REAL"]
+
+    # the hand-written synthetic rows are pinned
+    assert len(samples) == 5
+    assert all(e.source == "synthetic-hand-written" for e in samples)
+    assert {e.outcome for e in samples} == {"YES", "NO"}
+    # every synthetic example is clearly labelled as such
+    assert all("SYNTHETIC" in e.news_snapshot for e in samples)
+
+    # the REAL set is genuinely labelled data (docs/PLAYTESTING.md round 1)
+    assert len(real) >= 20
+    assert {e.outcome for e in real} <= {"YES", "NO"}
+    assert len({e.market_question for e in real}) == len(real)  # no duplicates
+    for e in real:
+        assert e.source.startswith("REAL")
+        # decision-time price is a real, non-degenerate quote
+        assert 0.02 <= e.odds_snapshot_yes <= 0.98
+        # the snapshot is market metadata, and says so — it is not news
+        assert "not news" in e.news_snapshot
+        assert e.market_question
 
     out = tmp_path / "rt.jsonl"
     save_jsonl(examples, out)

@@ -17,7 +17,7 @@ from app.predict import (
     hours_to_resolution,
     tape_features,
 )
-from tests.fakes import trade_v2_items
+from tests.fakes import mixed_trade_v2_items, trade_v2_items
 
 
 def test_book_features_depth_and_imbalance():
@@ -145,6 +145,40 @@ def test_social_counts_are_labelled_network_wide_and_unfiltered():
     assert "network-wide (unfiltered)" in build_snapshot_text(
         "Will it rain tomorrow?", 0.55, features, []
     )
+
+
+def test_tape_ignores_the_other_token():
+    """Regression: ``/v2/trades`` interleaves BOTH outcomes.
+
+    Live-checked 2026-10-01: 71 of the last 100 rows for one market were
+    NO-token trades near 0.97 while the YES token traded at 0.029, so the
+    unfiltered vwap read 0.7628 for a 2.85c market and the "buy" flow was
+    really the NO side's.
+    """
+    mixed = mixed_trade_v2_items()
+    filtered = tape_features(mixed, yes_token_id="111")
+    yes_only = tape_features(trade_v2_items(), yes_token_id="111")
+    assert filtered == yes_only  # the NO-token rows contribute nothing
+    assert filtered["count"] == 3
+    # and the unfiltered math really is wrong on the same rows
+    assert tape_features(mixed)["vwap"] != filtered["vwap"]
+
+
+def test_tape_drops_rows_that_identify_no_side():
+    unscoped = [{"price": 0.5, "size": 10.0, "side": "BUY", "timestamp": 1}]
+    assert tape_features(unscoped, yes_token_id="111")["count"] == 0
+    assert tape_features(unscoped)["count"] == 1  # unit tests can opt out
+
+
+def test_tape_accepts_outcome_aliases_when_token_id_is_absent():
+    rows = [
+        {"price": 0.5, "size": 10.0, "side": "BUY", "timestamp": 1, "outcome_index": 0},
+        {"price": 0.97, "size": 10.0, "side": "BUY", "timestamp": 1, "outcome_index": 1},
+        {"price": 0.5, "size": 10.0, "side": "BUY", "timestamp": 1, "outcome": "Yes"},
+    ]
+    tape = tape_features(rows, yes_token_id="111")
+    # outcome_index 0 and outcome "Yes" are kept; outcome_index 1 is not
+    assert tape["count"] == 2
 
 
 def test_snapshot_text_is_bounded_and_mentions_the_base_rate():

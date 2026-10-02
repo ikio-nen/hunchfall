@@ -43,7 +43,7 @@ from app.config import Settings
 from app.jev.client import DecisionState, JevClient
 from app.memory.audit import AuditLog
 from app.paths import utcnow_iso
-from app.polymarket.clob import ClobClient
+from app.polymarket.clob import ClobClient, book_levels
 from app.polymarket.data_api import DataApiClient, DataApiError
 from app.polymarket.gamma import (
     GammaClient,
@@ -199,8 +199,13 @@ def volume24hr_usd(market: dict) -> float | None:
 def book_features(book: dict, levels: int) -> dict:
     """Deterministic book features from a CLOB book payload.
 
+    Levels are normalized by ``clob.book_levels``: the real ``/book`` payload
+    serves level *objects* with string numbers, bids ascending and asks
+    descending, so index 0 is the WORST quote (live-checked 2026-10-01 —
+    reading it gave a 50.0¢ mid for a 2.85¢ market).
+
     Args:
-        book: CLOB ``/book`` payload (``bids``/``asks`` as ``[price, size]``).
+        book: CLOB ``/book`` payload.
         levels: Top-N levels per side used for depth.
 
     Returns:
@@ -209,20 +214,15 @@ def book_features(book: dict, levels: int) -> dict:
     Raises:
         PredictUpstreamError: when a side is empty (required input).
     """
-    bids = list(book.get("bids") or [])[: max(1, int(levels))]
-    asks = list(book.get("asks") or [])[: max(1, int(levels))]
+    bids, asks = book_levels(book if isinstance(book, dict) else {}, levels)
     if not bids or not asks:
         raise PredictUpstreamError("CLOB order book empty", source="clob")
-    best_bid = _float(bids[0][0])
-    best_ask = _float(asks[0][0])
-    if best_bid is None or best_ask is None:
+    best_bid = bids[0][0]
+    best_ask = asks[0][0]
+    if best_bid <= 0.0 or best_ask <= 0.0:
         raise PredictUpstreamError("CLOB book has no usable touch", source="clob")
-    bid_depth = sum(
-        (_float(level[0]) or 0.0) * (_float(level[1]) or 0.0) for level in bids
-    )
-    ask_depth = sum(
-        (_float(level[0]) or 0.0) * (_float(level[1]) or 0.0) for level in asks
-    )
+    bid_depth = sum(price * size for price, size in bids)
+    ask_depth = sum(price * size for price, size in asks)
     total = bid_depth + ask_depth
     out: dict = {
         "market_mid": _round((best_bid + best_ask) / 2.0, 6),
@@ -247,21 +247,62 @@ def _window(rows: list[tuple[float, float, str]], now: float) -> dict:
     return {"usd": size_price, "buy": buy, "sell": sell, "n": len(rows)}
 
 
-def tape_features(rows: list[dict], now_ts: float | None = None) -> dict:
+def _is_yes_side_row(row: Any, yes_token_id: str) -> bool:
+    """True when a ``/v2/trades`` row belongs to the market's YES token.
+
+    The endpoint interleaves **both outcomes** (live-checked 2026-10-01: 71 of
+    the last 100 rows for one market were NO-token trades near 0.97 while the
+    YES token traded at 0.029), so every USD/VWAP feature must first be scoped
+    to a single token. ``token_id`` is authoritative; ``outcome_index`` and
+    ``outcome`` are accepted as aliases. A row that identifies neither is
+    dropped — counting it would corrupt the flow numbers.
+
+    Args:
+        row: One trade row.
+        yes_token_id: The YES token id to keep.
+
+    Returns:
+        True when the row is a YES-token trade.
+    """
+    if not isinstance(row, dict):
+        return False
+    token = row.get("token_id")
+    if token is not None:
+        return str(token) == str(yes_token_id)
+    index = row.get("outcome_index")
+    if isinstance(index, int):
+        return index == 0
+    return str(row.get("outcome") or "").strip().lower() in ("yes", "true", "1")
+
+
+def tape_features(
+    rows: list[dict],
+    now_ts: float | None = None,
+    yes_token_id: str | None = None,
+) -> dict:
     """Deterministic tape features from ``/v2/trades`` rows.
 
     **USD notional per trade is ``size × price``** — these rows carry no
     ``usdc_size`` (see docs/API_INVENTORY.md); the formula is pinned by test.
 
+    **Only the YES token's trades are counted.** The feed interleaves both
+    outcomes, and blending them produced a vwap of 0.7628 for a market
+    trading at 2.85¢ with a flow imbalance that was really the NO side's
+    buying (live-checked 2026-10-01).
+
     Args:
         rows: Data API v2 trade items.
         now_ts: Optional "now" epoch seconds (tests).
+        yes_token_id: The market's YES token id; rows for the other outcome
+            are dropped. None keeps every row (unit tests only).
 
     Returns:
         Tape feature dict; momentum/accel keys are omitted when a window is
         empty (never guessed).
     """
     now = now_ts if now_ts is not None else datetime.now(timezone.utc).timestamp()
+    if yes_token_id is not None:
+        rows = [row for row in rows or [] if _is_yes_side_row(row, yes_token_id)]
     parsed: list[tuple[float, float, str, float]] = []
     for item in rows or []:
         if not isinstance(item, dict):
@@ -717,9 +758,11 @@ class PredictService:
     ) -> dict:
         """Resolve an identifier to a tradeable market (single seam).
 
-        The slug path is verified; the ``condition_id`` path is an explicitly
-        live-checked surface (Gamma ``/markets/{id}`` accepts a market id or a
-        condition id). Failures map to 404/409/502.
+        The slug path is verified. The ``condition_id`` path is live-checked
+        (2026-10-01): a raw condition id is rejected by ``/markets/{id}``
+        ("id is invalid"), so it resolves through Gamma's verified
+        ``/markets?condition_ids=`` filter instead. Failures map to
+        404/409/502.
 
         Args:
             gamma: Gamma client.
@@ -736,7 +779,7 @@ class PredictService:
             if market_slug:
                 market = gamma.get_market_by_slug(market_slug)
             else:
-                market = gamma.get_market(str(condition_id))
+                market = gamma.get_market_by_condition_id(str(condition_id))
         except GammaError as exc:
             if "404" in str(exc):
                 raise PredictNotFound(
@@ -812,7 +855,9 @@ class PredictService:
         limit = int(getattr(self.settings, "PREDICT_TAPE_LIMIT", 100) or 100)
         try:
             rows = data_api.get_trades_v2(condition=condition_id, limit=limit) or []
-            features["tape"] = tape_features(rows)
+            features["tape"] = tape_features(
+                rows, yes_token_id=tokens[0] if tokens else None
+            )
         except DataApiError as exc:
             self.audit.record("stage_error", {"stage": "data-api.trades", "error": str(exc)})
             missing.append("tape")

@@ -18,10 +18,19 @@ keyset-based: response carries ``next_cursor`` -> pass as ``after_cursor``
 for the next page (no plain ``offset`` paging — old ``offset`` params are
 dropped).
 
+Market lookups: ``/markets/{id}`` takes the **numeric** Gamma market id
+(e.g. ``559651``). A raw **condition id is rejected** there — live-checked
+2026-10-01, ``GET /markets/0x<64hex>`` returns
+``{"type": "validation error", "error": "id is invalid"}``. Resolve a
+condition id with the verified ``GET /markets?condition_ids=<id>`` filter
+(``get_market_by_condition_id``).
+
 Market fields of interest: ``question``, ``description``, ``outcomes``,
 ``outcomePrices`` (**JSON STRING — must be parsed**), ``clobTokenIds``
-(comma-separated string), ``volume`` (cumulative USD), ``liquidity``,
-``endDate``, ``closed``, ``resolutionSource``.
+(**also a JSON STRING array**, e.g. ``'["3233822…", "2565931…"]'`` —
+live-checked 2026-10-01; splitting it on commas yields ids wrapped in
+``["`` … ``"]``, which CLOB rejects), ``volume`` (cumulative USD),
+``liquidity``, ``endDate``, ``closed``, ``resolutionSource``.
 
 GOTCHA: resolved markets may report ``outcomePrices`` as ``["0","0"]`` —
 a resolved-to-NO market reads as all zeros, which is indistinguishable
@@ -83,20 +92,40 @@ def parse_outcome_prices(market: dict) -> list[float]:
 
 
 def parse_token_ids(market: dict) -> list[str]:
-    """Parse Gamma ``clobTokenIds`` (comma-separated string or list).
+    """Parse Gamma ``clobTokenIds`` (JSON-array string, or a list).
+
+    Live-checked 2026-10-01: the field arrives as a **JSON-encoded array
+    string** — ``'["3233822…", "2565931…"]'`` — exactly like
+    ``outcomePrices``, *not* as a bare comma-separated list. Splitting it on
+    "," used to yield ``'["3233822…"'`` (brackets and quotes included); CLOB
+    then answered ``{"error": …}`` with no bids, so every book-dependent
+    path (``POST /predict``, the extension scan, the loop) failed against the
+    real API. A bare comma-separated string is still accepted for robustness.
 
     Args:
         market: Gamma market dict.
 
     Returns:
-        List of token id strings.
+        List of token id strings — empty when the field is missing or
+        unparseable, which callers treat as "not tradeable" rather than
+        guessing an id.
     """
     raw = market.get("clobTokenIds")
-    if isinstance(raw, str):
-        return [t.strip() for t in raw.split(",") if t.strip()]
     if isinstance(raw, (list, tuple)):
         return [str(t) for t in raw]
-    return []
+    if not isinstance(raw, str):
+        return []
+    text = raw.strip()
+    if text.startswith("["):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("gamma: unparseable clobTokenIds: %r", raw)
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [str(t).strip() for t in parsed if str(t).strip()]
+    return [t.strip() for t in text.split(",") if t.strip()]
 
 
 def is_resolved(market: dict) -> bool:
@@ -210,17 +239,69 @@ class GammaClient:
         return self._get(f"/events/slug/{slug}")
 
     def get_market(self, market_id: str) -> dict:
-        """Fetch one market by id, incl. outcomes + resolution rules.
+        """Fetch one market by its *numeric* Gamma market id.
 
         GET /markets/{id} — rate limit 300/10s.
 
+        A condition id is **not** a valid ``{id}``: live-checked 2026-10-01,
+        ``/markets/0x<64hex>`` answers ``{"type": "validation error",
+        "error": "id is invalid"}``. Use ``get_market_by_condition_id`` for
+        that (see ``resolve_market`` in ``app/predict.py``).
+
         Args:
-            market_id: Gamma market id (or condition id).
+            market_id: Numeric Gamma market id, e.g. "559651".
 
         Returns:
             Market dict.
         """
         return self._get(f"/markets/{market_id}")
+
+    def get_market_by_condition_id(self, condition_id: str) -> dict:
+        """Resolve a raw condition id to its market (the verified path).
+
+        GET /markets?condition_ids=<id> is the only working condition-id
+        lookup — the path form ``/markets/{condition_id}`` is rejected as an
+        invalid id. Live-checked 2026-10-01, and the filter has two traps:
+
+        * the id matches **case-sensitively**, so it is lowercased first;
+        * by default Gamma returns **open** markets only, so a *resolved*
+          market matches nothing until the query is repeated with
+          ``closed=true``. Without that retry a resolved market is
+          indistinguishable from an unknown id, and callers report
+          "not found" instead of "closed/resolved".
+
+        A returned row is accepted only when its ``conditionId`` really
+        matches the requested id, so a silently-ignored filter (Gamma ignores
+        unknown params and serves a default page — see ``market_ids``) can
+        never masquerade as a hit.
+
+        Args:
+            condition_id: 0x-prefixed condition id.
+
+        Returns:
+            The matching market dict, or ``{}`` when nothing matches (callers
+            map that to their own not-found error).
+        """
+        needle = str(condition_id).strip().lower()
+        if not needle:
+            return {}
+        for extra in ({}, {"closed": "true"}):
+            params = {"condition_ids": needle, "limit": 1}
+            params.update(extra)
+            payload = self._get("/markets", params=params)
+            if isinstance(payload, list):
+                rows = payload
+            elif isinstance(payload, dict):
+                rows = payload.get("data") or []
+            else:
+                rows = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                found = str(row.get("conditionId") or "").strip().lower()
+                if found and found == needle:
+                    return row
+        return {}
 
     def get_market_by_slug(self, slug: str) -> dict:
         """Fetch one market by slug. GET /markets/slug/{slug}.

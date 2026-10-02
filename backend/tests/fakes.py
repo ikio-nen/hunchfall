@@ -12,6 +12,7 @@ from typing import Any
 from app.config import Settings
 from app.jev.client import Decision
 from app.polymarket.data_api import DataApiError
+from app.polymarket.clob import book_levels
 from app.polymarket.gamma import GammaError
 
 
@@ -37,7 +38,10 @@ def market_payload(**overrides) -> dict:
         "question": "Will it rain tomorrow?",
         "outcomes": '["Yes", "No"]',
         "outcomePrices": '["0.5", "0.5"]',
-        "clobTokenIds": "111,222",
+        # REAL shape (live-checked 2026-10-01): a JSON-array string, not a
+        # bare comma-separated list. A fixture that mirrored the old guess let
+        # a broken parser pass the whole suite while the live API 400'd.
+        "clobTokenIds": '["111", "222"]',
         "endDate": (now + timedelta(hours=48)).isoformat(),
         "volume": 12345,
         "closed": False,
@@ -106,6 +110,13 @@ class FakeGamma:
             )
         return dict(self.market)
 
+    def get_market_by_condition_id(self, condition_id: str) -> dict:
+        """Condition-id lookup: the real API returns an empty list when
+        nothing matches, which callers map to not-found."""
+        if self.not_found:
+            return {}
+        return dict(self.market)
+
     def get_event_by_slug(self, slug: str) -> dict:
         if self.not_found:
             raise GammaError(
@@ -127,14 +138,33 @@ class FakeClob:
         fail: bool = False,
     ) -> None:
         self.settings = settings
+        # REAL shape and order (live-checked 2026-10-01): level OBJECTS with
+        # STRING numbers, bids ascending and asks descending — the touch is the
+        # LAST element on each side, so a fixture that only ever had one level
+        # per side hid both bugs. The outer levels are deliberately asymmetric:
+        # reading index 0 would give mid 0.525 instead of the true 0.50.
         self.book = (
             book
             if book is not None
-            else {"bids": [[0.49, 5000.0]], "asks": [[0.51, 5000.0]]}
+            else {
+                "bids": [
+                    {"price": "0.35", "size": "1000.0"},
+                    {"price": "0.49", "size": "5000.0"},
+                ],
+                "asks": [
+                    {"price": "0.70", "size": "1000.0"},
+                    {"price": "0.51", "size": "5000.0"},
+                ],
+                "last_trade_price": "0.50",
+                "min_order_size": "5",
+                "tick_size": "0.001",
+            }
         )
         self.fail = fail
+        self.token_ids: list[str] = []
 
     def get_orderbook(self, token_id: str) -> dict:
+        self.token_ids.append(token_id)
         if self.fail:
             raise RuntimeError("clob down")
         return self.book
@@ -142,11 +172,10 @@ class FakeClob:
     def get_mid_price(self, token_id: str) -> float:
         if self.fail:
             raise RuntimeError("clob down")
-        bids = self.book.get("bids") or []
-        asks = self.book.get("asks") or []
+        bids, asks = book_levels(self.book)
         if not bids or not asks:
             raise RuntimeError("empty book")
-        return (float(bids[0][0]) + float(asks[0][0])) / 2.0
+        return (bids[0][0] + asks[0][0]) / 2.0
 
     def close(self) -> None:
         pass
@@ -208,8 +237,35 @@ class FakeJev:
         pass
 
 
+def _trade_v2_row(
+    price: float,
+    size: float,
+    side: str,
+    ts: float,
+    *,
+    token_id: str = "111",
+    outcome: str = "Yes",
+    outcome_index: int = 0,
+) -> dict:
+    """One row shaped like the real ``/v2/trades`` payload (live 2026-10-01)."""
+    return {
+        "proxy_wallet": "0xabc",
+        "condition_id": "0xcondition",
+        "token_id": token_id,
+        "outcome": outcome,
+        "outcome_index": outcome_index,
+        "side": side,
+        "price": price,
+        "size": size,
+        "timestamp": int(ts),
+        "title": "Will it rain tomorrow?",
+        "slug": "will-it-rain-tomorrow",
+        "transaction_hash": "0xtx",
+    }
+
+
 def trade_v2_items() -> list[dict]:
-    """Rows in the *real* ``/v2/trades`` shape: price/size/side/timestamp.
+    """YES-token rows in the *real* ``/v2/trades`` shape.
 
     These rows carry **no ``usdc_size``** — USD notional is ``size × price``
     (RFC-003 §3). Hand-computed expectations for this fixture:
@@ -218,10 +274,30 @@ def trade_v2_items() -> list[dict]:
     """
     now = datetime.now(timezone.utc).timestamp()
     return [
-        {"price": 0.50, "size": 1200.0, "side": "BUY", "timestamp": now - 60},
-        {"price": 0.51, "size": 600.0, "side": "BUY", "timestamp": now - 30},
-        {"price": 0.49, "size": 800.0, "side": "SELL", "timestamp": now - 10},
+        _trade_v2_row(0.50, 1200.0, "BUY", now - 60),
+        _trade_v2_row(0.51, 600.0, "BUY", now - 30),
+        _trade_v2_row(0.49, 800.0, "SELL", now - 10),
     ]
+
+
+def mixed_trade_v2_items() -> list[dict]:
+    """What the endpoint really returns: **both tokens interleaved**.
+
+    Live-checked 2026-10-01 — 71 of the last 100 rows for one market were
+    NO-token trades priced near the complement (~0.97) while the YES token
+    traded at ~0.029. Any feature that forgets to scope to one token is
+    obviously wrong on this fixture (mixed vwap lands near 0.76).
+    """
+    now = datetime.now(timezone.utc).timestamp()
+    no_rows = [
+        _trade_v2_row(
+            0.97, 3000.0, "BUY", now - 50, token_id="222", outcome="No", outcome_index=1
+        ),
+        _trade_v2_row(
+            0.96, 500.0, "SELL", now - 20, token_id="222", outcome="No", outcome_index=1
+        ),
+    ]
+    return trade_v2_items() + no_rows
 
 
 class FakeTradesApi:
@@ -234,7 +310,9 @@ class FakeTradesApi:
         fail: bool = False,
     ) -> None:
         self.settings = settings
-        self.items = items if items is not None else trade_v2_items()
+        # Default to the REAL mixed feed, so the API paths exercise the
+        # YES-token scoping instead of a fixture that hides the bug.
+        self.items = items if items is not None else mixed_trade_v2_items()
         self.fail = fail
         self.calls: list[dict] = []
 

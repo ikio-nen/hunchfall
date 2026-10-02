@@ -41,7 +41,7 @@ from app.loop import (
 from app.memory.audit import AuditLog
 from app.paths import utcnow_iso
 from app.policy.gate import RiskGate, Signal, buy_direction
-from app.polymarket.clob import ClobClient
+from app.polymarket.clob import ClobClient, book_levels
 from app.polymarket.data_api import DataApiClient, DataApiError
 from app.polymarket.gamma import GammaClient, GammaError, is_resolved, negrisk_sum
 
@@ -250,12 +250,11 @@ class ScanService:
         """
         try:
             book = clob.get_orderbook(token_id) or {}
-            bids = list(book.get("bids") or [])[:BOOK_DEPTH_LEVELS]
-            asks = list(book.get("asks") or [])[:BOOK_DEPTH_LEVELS]
+            bids, asks = book_levels(book, BOOK_DEPTH_LEVELS)
             if not bids or not asks:
                 raise ValueError("empty book side")
-            best_bid_p, best_bid_s = float(bids[0][0]), float(bids[0][1])
-            best_ask_p, best_ask_s = float(asks[0][0]), float(asks[0][1])
+            best_bid_p, best_bid_s = bids[0]
+            best_ask_p, best_ask_s = asks[0]
             if not (0.0 < best_bid_p < 1.0 and 0.0 < best_ask_p < 1.0):
                 raise ValueError("book price outside (0, 1)")
         except Exception as exc:  # noqa: BLE001 - recorded, mapped to 502
