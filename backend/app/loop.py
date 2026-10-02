@@ -16,8 +16,9 @@ loop honestly reports ``"no opportunities"`` instead of inventing trades.
 
 Usage (from backend/)::
 
-    python -m app.loop --once    # single cycle, prints JSON summary
-    python -m app.loop --watch   # loop every LOOP_INTERVAL_SEC
+    python -m app.loop --once     # single cycle, prints JSON summary
+    python -m app.loop --cycles 2 # supervised: N cycles, clean audited shutdown
+    python -m app.loop --watch    # loop every LOOP_INTERVAL_SEC
 """
 from __future__ import annotations
 
@@ -842,49 +843,146 @@ def run_once(settings: Settings) -> dict:
     return summary
 
 
+def run_cycles(
+    settings: Settings,
+    cycles: int | None = None,
+    *,
+    interval: int | None = None,
+) -> int:
+    """Run the paper loop bounded by ``cycles`` (None = until stopped).
+
+    Bounded mode is the supervised proof run: exactly N cycles execute, then
+    the loop shuts down cleanly and audit-logs a ``loop_shutdown`` event
+    (``reason: "cycles_exhausted"``). An engaged kill switch or Ctrl-C stops
+    it early — also audit-logged — and the process still exits 0 (paper mode
+    has no failure exit). A cycle that raises is recorded and tolerated, so
+    one bad upstream never aborts a supervised run.
+
+    Args:
+        settings: App Settings.
+        cycles: Max cycles to run; None = unbounded (the pre-existing
+            ``--watch`` behavior).
+        interval: Seconds between cycles (default ``LOOP_INTERVAL_SEC``; 0
+            runs back-to-back supervised cycles).
+
+    Returns:
+        Process exit code (always 0).
+    """
+    wait = int(settings.LOOP_INTERVAL_SEC) if interval is None else int(interval)
+    audit = AuditLog(resolve_db_path(settings.DATABASE_PATH))
+    run = 0
+    try:
+        while cycles is None or run < cycles:
+            ks = read_killswitch()
+            if ks.get("engaged"):
+                print(
+                    json.dumps(
+                        {
+                            "status": "halted",
+                            "mode": "PAPER",
+                            "reason": "kill_switch_engaged",
+                        }
+                    )
+                )
+                audit.record(
+                    "loop_shutdown",
+                    {
+                        "reason": "kill_switch_engaged",
+                        "cycles_run": run,
+                        "mode": "PAPER",
+                        "ts": utcnow_iso(),
+                    },
+                )
+                return 0
+            try:
+                summary = run_once(settings)
+            except Exception as exc:  # noqa: BLE001 - keep watching
+                summary = {"status": "error", "mode": "PAPER", "error": str(exc)}
+            run += 1
+            if cycles is not None:
+                summary["cycle"] = run
+                summary["cycles_remaining"] = cycles - run
+            print(json.dumps(summary, indent=2), flush=True)
+            if cycles is not None and run >= cycles:
+                break
+            if wait > 0:
+                time.sleep(wait)
+        if cycles is not None:
+            # Bounded run finished every requested cycle: clean, audited stop.
+            audit.record(
+                "loop_shutdown",
+                {
+                    "reason": "cycles_exhausted",
+                    "cycles_run": run,
+                    "mode": "PAPER",
+                    "ts": utcnow_iso(),
+                },
+            )
+            print(
+                json.dumps(
+                    {
+                        "status": "stopped",
+                        "mode": "PAPER",
+                        "reason": "cycles_exhausted",
+                        "cycles_run": run,
+                    }
+                )
+            )
+        return 0
+    except KeyboardInterrupt:
+        audit.record(
+            "loop_shutdown",
+            {
+                "reason": "interrupted",
+                "cycles_run": run,
+                "mode": "PAPER",
+                "ts": utcnow_iso(),
+            },
+        )
+        print(json.dumps({"status": "stopped", "mode": "PAPER"}))
+        return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint: ``--once`` (default) or ``--watch``."""
+    """CLI entrypoint: ``--once`` | ``--cycles N`` (bounded) | ``--watch``."""
     parser = argparse.ArgumentParser(
         description="hunchfall paper trading loop (no real orders, ever)"
     )
-    parser.add_argument("--once", action="store_true", help="run one cycle")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="run one cycle (shorthand for --cycles 1)",
+    )
     parser.add_argument(
         "--watch",
         action="store_true",
-        help="loop every LOOP_INTERVAL_SEC until kill switch / Ctrl-C",
+        help="loop every LOOP_INTERVAL_SEC until kill switch / Ctrl-C "
+        "(add --cycles N to bound it)",
+    )
+    parser.add_argument(
+        "--cycles",
+        type=int,
+        default=None,
+        metavar="N",
+        help="run at most N cycles, then shut down cleanly (audit-logged)",
     )
     args = parser.parse_args(argv)
     settings = Settings()
 
-    if args.watch:
+    cycles = 1 if args.once else args.cycles
+    if cycles is not None and cycles < 1:
+        parser.error("--cycles must be >= 1")
+
+    if args.watch or cycles is not None:
         # NOTE: --watch polls REST each cycle. app/polymarket/ws.py is the
         # optional websocket upgrade (live book/price_change events +
         # staleness heartbeat, no extra REST polling) — wire it into the
         # snapshot path here when going live.
-        interval = int(settings.LOOP_INTERVAL_SEC)
-        try:
-            while True:
-                ks = read_killswitch()
-                if ks.get("engaged"):
-                    print(
-                        json.dumps(
-                            {
-                                "status": "halted",
-                                "mode": "PAPER",
-                                "reason": "kill_switch_engaged",
-                            }
-                        )
-                    )
-                    return 0
-                try:
-                    summary = run_once(settings)
-                except Exception as exc:  # noqa: BLE001 - keep watching
-                    summary = {"status": "error", "mode": "PAPER", "error": str(exc)}
-                print(json.dumps(summary, indent=2), flush=True)
-                time.sleep(interval)
-        except KeyboardInterrupt:
-            print(json.dumps({"status": "stopped", "mode": "PAPER"}))
-            return 0
+        return run_cycles(
+            settings,
+            cycles,
+            interval=int(settings.LOOP_INTERVAL_SEC) if args.watch else 0,
+        )
 
     print(json.dumps(run_once(settings), indent=2))
     return 0

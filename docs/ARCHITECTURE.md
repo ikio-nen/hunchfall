@@ -118,7 +118,7 @@ The **kill switch** lives in two places:
 | Paper execution | `app/execution/paper.py` | Virtual taker fills at live CLOB touch (half-spread cross) + level-by-level book-walk when size > 1% of visible depth; partial fills when depth < size; taker fee `fee = C x rate x p x (1-p)` by category. Records intended vs simulated price. Never touches a trading endpoint. |
 | Audit log | `app/memory/audit.py` | Append-only storage (SQLite). Fills, vetoes, Jev outputs (incl. model version), prices, drawdown, kill events. The dashboard and playtest read this. |
 | API | `app/api/` | FastAPI server: `GET /state`, `GET /positions`, `GET /vetoes`, `GET /pnl`, `POST /kill`, `POST /rearm`, `GET /health`, `GET /config` (secrets stripped). Reads audit + latest state. |
-| Loop | `app/loop.py` | Orchestrates one full cycle (`--once`) or continuous (`--watch`, `LOOP_INTERVAL_SEC`). Performs kill-switch checks (auto at -15% paper drawdown). |
+| Loop | `app/loop.py` | Orchestrates one full cycle (`--once` = `--cycles 1`), N supervised cycles (`--cycles N`, audit-logged shutdown), or continuous (`--watch`, `LOOP_INTERVAL_SEC`). Performs kill-switch checks (auto at -15% paper drawdown). |
 | Playtest | `app/playtest/` | Labeled resolved-market harness: 60/20/20 time-based split, accuracy, abstention, Brier, calibration (temperature/Platt scaling on the calibration split). See `docs/PLAYTESTING.md`. |
 
 ## Data flow of one full cycle
