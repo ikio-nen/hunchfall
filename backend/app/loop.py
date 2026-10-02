@@ -213,7 +213,9 @@ def _uma_dispute(market: dict) -> bool:
     return False
 
 
-def _fast_scan_context(market: dict, volume_usd: float) -> tuple[str, str]:
+def _fast_scan_context(
+    market: dict, volume_usd: float, top_n: int = 5
+) -> tuple[str, str]:
     """Deterministic Jev context for a fast-scan candidate (no AI, no cost).
 
     The fast scanner has no story and no Muse summary, so Jev's ``noul``
@@ -225,6 +227,7 @@ def _fast_scan_context(market: dict, volume_usd: float) -> tuple[str, str]:
     Args:
         market: Slimmed Gamma market dict (see app/scraper/fast_scan).
         volume_usd: Precomputed 24h volume in USD.
+        top_n: The FAST_SCAN_TOP_N setting, so the prompt text stays true.
 
     Returns:
         (news_summary, extra_context) for the Jev DecisionState.
@@ -239,7 +242,7 @@ def _fast_scan_context(market: dict, volume_usd: float) -> tuple[str, str]:
     hours = _hours_to_resolution(market)
     negrisk = negrisk_sum(market)
     summary = (
-        "Fast volume scan: this market is in the top-5 by 24h volume "
+        f"Fast volume scan: this market is in the top-{top_n} by 24h volume "
         f"(${volume_usd:,.0f}) in {category} on Polymarket right now."
     )
     context = (
@@ -791,7 +794,7 @@ def run_once(settings: Settings) -> dict:
                 continue
             seen_market_ids.add(picked["market_id"])
             _process_picked(
-                picked, cand.news_summary, cand.extra_context, "muse-scan", ""
+                picked, cand.news_summary, cand.extra_context, "muse-scan", cand.scanned_at
             )
 
         if fast_scan_on:
@@ -817,7 +820,9 @@ def run_once(settings: Settings) -> dict:
                 seen_market_ids.add(market_id)
                 vol = volume_24h(market)
                 question = str(market.get("question") or "unknown market")
-                news_summary, extra_context = _fast_scan_context(market, vol)
+                news_summary, extra_context = _fast_scan_context(
+                    market, vol, top_n=int(settings.FAST_SCAN_TOP_N)
+                )
                 _process_picked(
                     {
                         "market_id": market_id,
@@ -829,7 +834,7 @@ def run_once(settings: Settings) -> dict:
                     news_summary,
                     extra_context,
                     "fast-scan",
-                    "",
+                    utcnow_iso(),
                 )
     finally:
         for client in (gamma, clob, data_api, jev):
