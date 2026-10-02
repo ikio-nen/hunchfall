@@ -34,6 +34,7 @@ import time
 import httpx
 
 from app.config import Settings
+from app.polymarket.shim import ShimError, shim_fallback
 
 log = logging.getLogger(__name__)
 
@@ -117,6 +118,23 @@ def _retry_after_seconds(raw: str | None) -> float:
         return 1.0
 
 
+def _unwrap_v2(payload: object) -> tuple[list, dict]:
+    """Unwrap the v2 ``{data, pagination}`` envelope.
+
+    Args:
+        payload: Parsed response body.
+
+    Returns:
+        ``(data_list, pagination_dict)``; a bare list is returned as-is with
+        empty pagination.
+    """
+    if isinstance(payload, dict):
+        data = payload.get("data", [])
+        pagination = payload.get("pagination") or {}
+        return (data if isinstance(data, list) else []), pagination
+    return (payload if isinstance(payload, list) else []), {}
+
+
 class DataApiClient:
     """Sync read-only client for the Polymarket Data API."""
 
@@ -146,9 +164,24 @@ class DataApiClient:
             resp = self._http.get(path, params=params)
             resp.raise_for_status()
         except httpx.HTTPError as exc:
-            raise DataApiError(
-                f"Data API request failed [{endpoint}]: {exc}"
-            ) from exc
+            try:
+                shim_resp = shim_fallback(
+                    self.settings, "data-api", path, params, exc
+                )
+            except ShimError as shim_exc:
+                raise DataApiError(
+                    f"Data API request failed [{endpoint}]: {shim_exc}"
+                ) from shim_exc
+            if shim_resp is None:
+                raise DataApiError(
+                    f"Data API request failed [{endpoint}]: {exc}"
+                ) from exc
+            if shim_resp.status_code >= 400:
+                raise DataApiError(
+                    f"Data API request failed [{endpoint}] via shim: "
+                    f"HTTP {shim_resp.status_code}"
+                ) from exc
+            return shim_resp.json()
         return resp.json()
 
     # ---- Data API v2 (verified params; v1 retires 2026-10-24) -------------
@@ -207,15 +240,25 @@ class DataApiClient:
                     time.sleep(min(retry_after, 5.0))
                     continue
                 resp.raise_for_status()
-                payload = resp.json()
-                if isinstance(payload, dict):
-                    data = payload.get("data", [])
-                    pagination = payload.get("pagination") or {}
-                    return (data if isinstance(data, list) else []), pagination
-                return (payload if isinstance(payload, list) else []), {}
+                return _unwrap_v2(resp.json())
             except DataApiError:
                 raise
             except httpx.HTTPError as exc:
+                try:
+                    shim_resp = shim_fallback(
+                        self.settings, "data-api", path, clean, exc
+                    )
+                except ShimError as shim_exc:
+                    raise DataApiError(
+                        f"Data API v2 request failed [{endpoint}]: {shim_exc}"
+                    ) from shim_exc
+                if shim_resp is not None:
+                    if shim_resp.status_code >= 400:
+                        raise DataApiError(
+                            f"Data API v2 request failed [{endpoint}] via "
+                            f"shim: HTTP {shim_resp.status_code}"
+                        ) from exc
+                    return _unwrap_v2(shim_resp.json())
                 last_exc = exc
                 break
         detail = (

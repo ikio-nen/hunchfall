@@ -120,6 +120,33 @@ auto-kills; `POST /resume` re-arms it.
 
 Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 
+### Blocked networks (optional local shim)
+
+Some networks cannot open direct TCP connections to Polymarket — every gamma /
+clob / data-api request times out. If yours is one, run the included read-only
+loopback shim (GET only; it rides the documented `r.jina.ai` fetch proxy and
+unwraps the proxy envelope):
+
+```bash
+cd backend
+python scripts/live_shim.py 8011
+```
+
+Then point the backend at the shim mounts:
+
+```bash
+POLYMARKET_GAMMA_URL=http://127.0.0.1:8011/gamma
+POLYMARKET_CLOB_URL=http://127.0.0.1:8011/clob
+POLYMARKET_DATA_API_URL=http://127.0.0.1:8011/data
+python -m app.api.run
+```
+
+Or leave those URLs on the real hosts and set
+`POLYMARKET_SHIM_URL=http://127.0.0.1:8011`: a connection-level failure
+(`ConnectError` / `ConnectTimeout`) is then replayed **once** through the
+shim, while HTTP errors and read timeouts never fall back. The fallback is
+off unless `POLYMARKET_SHIM_URL` is set and `POLYMARKET_SHIM_ON_BLOCKED=true`.
+
 ## Environment variables
 
 | Name | Default | Purpose |
@@ -128,6 +155,8 @@ Set `JEV_API_KEY` and `JEV_MOCK=false`. Never commit keys.
 | `POLYMARKET_CLOB_URL` | `https://clob.polymarket.com` | CLOB market-data base URL (no trading endpoints) |
 | `POLYMARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | CLOB websocket (optional `--watch` upgrade) |
 | `POLYMARKET_DATA_API_URL` | `https://data-api.polymarket.com` | Data API **v2** base URL (trades/history/activity/positions; v1 retired) |
+| `POLYMARKET_SHIM_URL` | — (off) | optional loopback shim base; blocked egress only, one replay |
+| `POLYMARKET_SHIM_ON_BLOCKED` | `true` | allow the one-replay fallback (ConnectError/ConnectTimeout only) |
 | `GDELT_DOC_URL` | `https://api.gdeltproject.org/api/v2/doc/doc` | GDELT 2.1 DOC API base (keyless) |
 | `JEV_API_URL` | `https://api.typesafe.ai` | TypeSafe Jev base (live call is `POST /v1/systemone`) |
 | `JEV_API_KEY` | — | Jev API key (secret) |
