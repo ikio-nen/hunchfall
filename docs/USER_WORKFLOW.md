@@ -61,3 +61,23 @@ The social-media analyzer (Bluesky Jetstream + Reddit + RSS, all keyless) is
 a bounded window, not generic sentiment. X is excluded; X-centric markets are
 labelled a **proxy**. Its numbers are a feature in the snapshot and the UI —
 they can never set the direction or the abstention.
+
+## The dashboard screens behind the journey
+
+| Screen | What the user sees | API |
+|--------|-------------------|-----|
+| Overview | Paper bankroll equity curve, open paper positions, today's hunches, kill-switch state | `GET /status` |
+| Hunches | Prediction feed — market, P(true), live price, edge %, YES/NO side, timestamp; tap for full reasoning | `GET /signals` |
+| Validation ⭐ | Did the AI get it right? Predicted direction vs live price now, HIT ✓ / MISS ✗ stamped per hunch | `POST /signals/{id}/validate` |
+| Positions | Paper book — simulated fills at live CLOB prices, fees applied, P&L, MOCK labels | `GET /positions` |
+| Vetoes | Every abstention with its reason (spread too wide, UMA risk, low confidence…) | `GET /vetoes` |
+| Marketplaces | "Your bets on Polymarket" — cards per marketplace | `GET /marketplaces` |
+| Kill switch | Big red button — halts the loop, flattens the paper book; resume is human-only | `POST /kill` |
+
+## Edge cases the UI must handle
+
+- Extension on a non-market page → panel stays hidden, no scan sent.
+- Backend down → dashboard shows cached data + banner; extension panel shows "backend unreachable".
+- Invalid wallet input (not `^0x[0-9a-fA-F]{40}$`) → rejected client-side with a plain-language error; mnemonics/keystores are never accepted anywhere.
+- Market resolves or disappears before validation → verdict recorded as "ungraded", never silently dropped.
+- Kill switch armed → banner on every screen; scans return ABSTAIN with reason "loop halted".
