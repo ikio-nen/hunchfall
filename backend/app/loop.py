@@ -40,9 +40,9 @@ from app.paths import (
     write_killswitch,
 )
 from app.policy.gate import RiskGate, Signal
-from app.polymarket.clob import ClobClient
+from app.polymarket.clob import ClobClient, book_levels
 from app.polymarket.data_api import DataApiClient
-from app.polymarket.gamma import GammaClient, negrisk_sum
+from app.polymarket.gamma import GammaClient, negrisk_sum, parse_token_ids
 from app.scraper import Story
 from app.scraper.filter import dedupe_by_url, filter_by_engagement
 from app.scraper.gdelt import fetch_gdelt_trending
@@ -90,14 +90,11 @@ def _as_list(value: Any) -> list:
 def _market_tokens(market: dict) -> tuple[str, str] | None:
     """Return (yes_token_id, no_token_id) for a Gamma market dict, or None.
 
-    Handles ``clobTokenIds``/``outcomes`` as either JSON strings or lists.
+    Uses the shared ``parse_token_ids`` so the JSON-array-string form Gamma
+    actually returns (``'["a", "b"]'``, live-checked 2026-10-01) is parsed
+    identically here and in the predictor/scan paths.
     """
-    # clobTokenIds arrives comma-separated (or as a list); outcomes as JSON.
-    raw_ids = market.get("clobTokenIds")
-    if isinstance(raw_ids, str):
-        token_ids = [t.strip() for t in raw_ids.split(",") if t.strip()]
-    else:
-        token_ids = _as_list(raw_ids)
+    token_ids = parse_token_ids(market)
     outcomes = _as_list(market.get("outcomes"))
     if len(token_ids) < 2:
         return None
@@ -321,12 +318,14 @@ def _snapshot(
     """
     try:
         book = clob.get_orderbook(token_id) or {}
-        bids = [lvl for lvl in (book.get("bids") or [])][:BOOK_DEPTH_LEVELS]
-        asks = [lvl for lvl in (book.get("asks") or [])][:BOOK_DEPTH_LEVELS]
+        # book_levels normalizes the real payload (level objects, string
+        # numbers, bids ascending / asks descending = best quote LAST) into
+        # best-first pairs, so index 0 is the touch on both sides.
+        bids, asks = book_levels(book, BOOK_DEPTH_LEVELS)
         if not bids or not asks:
             raise ValueError("empty book side")
-        best_bid_p, best_bid_s = float(bids[0][0]), float(bids[0][1])
-        best_ask_p, best_ask_s = float(asks[0][0]), float(asks[0][1])
+        best_bid_p, best_bid_s = bids[0]
+        best_ask_p, best_ask_s = asks[0]
         mid = (best_bid_p + best_ask_p) / 2.0
         spread_cents = (best_ask_p - best_bid_p) * 100.0
         top_depth = best_bid_p * best_bid_s + best_ask_p * best_ask_s

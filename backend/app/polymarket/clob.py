@@ -26,6 +26,7 @@ from __future__ import annotations
 import logging
 import random
 import time
+from typing import Any
 
 import httpx
 
@@ -42,6 +43,60 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
 class ClobError(RuntimeError):
     """Raised when a CLOB request fails; names the endpoint."""
+
+
+def parse_level(level: Any) -> tuple[float, float] | None:
+    """Normalize one CLOB book level into ``(price, size)`` floats.
+
+    Live-checked 2026-10-01: the real ``/book`` payload serves levels as
+    **objects with string numbers** — ``{"price": "0.001", "size":
+    "12142623.48"}`` — not as ``[price, size]`` pairs. Both shapes are
+    accepted here so no caller does its own indexing (which raised
+    ``KeyError: 0`` against the real feed).
+
+    Args:
+        level: One bid/ask entry from a book payload.
+
+    Returns:
+        ``(price, size)`` as floats, or None when the level is unusable.
+    """
+    if isinstance(level, dict):
+        price, size = level.get("price"), level.get("size")
+    elif isinstance(level, (list, tuple)) and len(level) >= 2:
+        price, size = level[0], level[1]
+    else:
+        return None
+    try:
+        return float(price), float(size)
+    except (TypeError, ValueError):
+        return None
+
+
+def book_levels(book: dict, levels: int | None = None) -> tuple[list, list]:
+    """Normalize a book into ``(bids, asks)`` as **best-first** pairs.
+
+    The venue returns **bids ascending and asks descending**, so the *last*
+    element on each side is the touch. Live-checked 2026-10-01 on a market
+    trading at 2.85¢: ``bids[0]`` was 0.001 and ``asks[0]`` was 0.999, so
+    reading index 0 gave a 50.0¢ mid instead of the true 2.85¢. This ranks by
+    price rather than trusting list order, so callers always get ``bids[0]``
+    = best bid (highest) and ``asks[0]`` = best ask (lowest).
+
+    Args:
+        book: CLOB ``/book`` payload.
+        levels: Keep at most this many levels per side (None keeps all).
+
+    Returns:
+        ``(bids, asks)`` — ``(price, size)`` float pairs, best-first.
+    """
+    bids = [lv for lv in (parse_level(x) for x in (book.get("bids") or [])) if lv]
+    asks = [lv for lv in (parse_level(x) for x in (book.get("asks") or [])) if lv]
+    bids.sort(key=lambda lv: lv[0], reverse=True)
+    asks.sort(key=lambda lv: lv[0])
+    if levels is None:
+        return bids, asks
+    keep = max(1, int(levels))
+    return bids[:keep], asks[:keep]
 
 
 class ClobClient:
@@ -219,26 +274,22 @@ class ClobClient:
 
     # ---- derived book math (unchanged from book payload) -------------------
     def _book_sides(self, token_id: str) -> tuple[list, list]:
-        """Return (bids, asks) from the order book.
+        """Return ``(bids, asks)`` from the order book, normalized best-first.
 
         Args:
             token_id: CLOB token id.
 
         Returns:
-            Tuple of (bids, asks) price/size lists.
+            Tuple of best-first ``(price, size)`` lists.
         """
         book = self.get_orderbook(token_id)
-        return book.get("bids", []), book.get("asks", [])
+        return book_levels(book if isinstance(book, dict) else {})
 
     @staticmethod
-    def _level_price(level: list) -> float | None:
-        """Extract float price from a [price, size] level."""
-        if not level:
-            return None
-        try:
-            return float(level[0])
-        except (TypeError, ValueError, IndexError):
-            return None
+    def _level_price(level: Any) -> float | None:
+        """Extract the float price from one book level (any supported shape)."""
+        parsed = parse_level(level)
+        return parsed[0] if parsed else None
 
     def get_mid_price(self, token_id: str) -> float:
         """Mid price of the best bid/ask (derived from the book).

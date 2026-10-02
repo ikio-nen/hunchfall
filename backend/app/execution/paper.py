@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from typing import Callable
 from uuid import uuid4
 
+from app.polymarket.clob import parse_level
 from app.policy.gate import Signal, buy_direction
 
 #: Verified taker fee rates by market category (fraction). Makers pay 0;
@@ -142,25 +143,20 @@ class PaperEngine:
             side: "YES" (take asks) or "NO" (take mirrored bids).
 
         Returns:
-            List of (price, size_shares) best-first.
+            List of (price, size_shares) best-first. Book levels arrive
+            best-first from ``clob.book_levels`` (the venue itself serves the
+            worst quote first, live-checked 2026-10-01).
         """
         if side == "YES":
             raw = signal.book_asks or []
-            levels = []
-            for lvl in raw:
-                try:
-                    levels.append((float(lvl[0]), float(lvl[1])))
-                except (TypeError, ValueError, IndexError):
-                    continue
-            return levels
-        # NO token asks = mirrored YES bids, best-first.
-        raw = signal.book_bids or []
+            return [lv for lv in (parse_level(x) for x in raw) if lv]
+        # NO token asks = mirrored YES bids. Both sides arrive best-first, and
+        # mirroring preserves that, so no reversal is needed here.
         levels = []
-        for lvl in reversed(raw):
-            try:
-                levels.append((1.0 - float(lvl[0]), float(lvl[1])))
-            except (TypeError, ValueError, IndexError):
-                continue
+        for lvl in signal.book_bids or []:
+            parsed = parse_level(lvl)
+            if parsed:
+                levels.append((1.0 - parsed[0], parsed[1]))
         return levels
 
     def execute(

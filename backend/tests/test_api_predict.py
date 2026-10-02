@@ -228,6 +228,43 @@ def test_client_construction_failure_is_a_502_envelope(tmp_path, monkeypatch):
     assert _audit(settings).predictions() == []  # fail closed: nothing logged
 
 
+def test_predict_asks_clob_for_clean_token_ids(tmp_path, monkeypatch):
+    """Regression: clobTokenIds is a JSON-array string; a comma split sent
+    CLOB an id wrapped in ``["`` … ``"]`` and every book came back empty."""
+    made: list[FakeClob] = []
+
+    def clob_factory(settings):
+        clob = FakeClob(settings)
+        made.append(clob)
+        return clob
+
+    client, _ = _client(tmp_path, monkeypatch, clob=clob_factory)
+    assert client.post("/predict", json=predict_body()).status_code == 200
+    assert made[0].token_ids == ["111"]  # the YES token, unquoted
+
+
+def test_predict_by_condition_id_resolves_and_records(tmp_path, monkeypatch):
+    """The condition_id path goes through Gamma's condition_ids filter."""
+    client, settings = _client(tmp_path, monkeypatch)
+    resp = client.post("/predict", json={"condition_id": "0x" + "a" * 64})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["market"]["condition_id"] == "0xcondition"
+    assert body["label"] == "paper prediction · no trade placed"
+    assert body["trade_placed"] is False
+    assert len(_audit(settings).predictions()) == 1
+
+
+def test_predict_unknown_condition_id_is_404(tmp_path, monkeypatch):
+    client, settings = _client(
+        tmp_path, monkeypatch, gamma=lambda s: FakeGamma(s, not_found=True)
+    )
+    resp = client.post("/predict", json={"condition_id": "0x" + "b" * 64})
+    assert resp.status_code == 404
+    assert resp.json()["detail"]["code"] == "market_not_found"
+    assert _audit(settings).predictions() == []  # fail closed: nothing logged
+
+
 # -------------------------------------------------------- GET /predict/accuracy
 def test_accuracy_is_derived_on_read(tmp_path, monkeypatch):
     client, settings = _client(tmp_path, monkeypatch)

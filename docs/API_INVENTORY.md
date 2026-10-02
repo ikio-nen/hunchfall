@@ -23,7 +23,17 @@ Columns: endpoint | method | auth? | rate limit | used for | status.
 
 Gotchas (verified):
 - `outcomePrices` arrives as a **JSON string** — must be parsed (`parse_outcome_prices`).
-- `clobTokenIds` is **comma-separated** (`parse_token_ids`).
+- `clobTokenIds` arrives as a **JSON-encoded array string**
+  (`'["3233…", "2565…"]'`), not a bare comma-separated list (live-checked
+  2026-10-01; splitting on `,` sent CLOB ids wrapped in `["` … `"]` and every
+  book came back empty). `parse_token_ids` accepts both forms.
+- **A condition id is not a market id.** `GET /markets/0x<64hex>` is rejected
+  (`{"type": "validation error", "error": "id is invalid"}`); resolve a raw
+  condition id with `GET /markets?condition_ids=<id>`
+  (`get_market_by_condition_id`, live-checked 2026-10-01). The filter matches
+  **case-sensitively** (lowercase first) and returns **open markets only** — a
+  *resolved* market needs `closed=true`, or it is indistinguishable from an
+  unknown id.
 - Resolved markets may report `outcomePrices` as `["0","0"]` — **validate winner
   fields before trusting**; the loop treats zeroed prices with no confirmed
   winner as a broken feed (veto `negrisk_sum_invalid`), never as a signal.
@@ -69,11 +79,11 @@ camelCase; `429` carries `Retry-After`; a documented miss returns an empty
 | `/v2/activity` | `user` (required, EVM address); `type` (comma-separated, e.g. `TRADE`; `TIP` opt-in only); `condition` (≤20 ids; aliases `condition_id`/`conditionId`); `event_id` (≤20, mutually exclusive with `condition`); `side`; `start`/`end` (epoch s); `limit` (default 100, max 1000); `cursor`; `sort_direction`; `exclude_deposits_withdrawals` (default true) | extension-scan trade tape (`type=TRADE&condition=`) + wallet activity feed (`user`) | verified |
 | `/v2/positions` | `user`; `status` (`OPEN`/`CLOSED`); `limit`; `cursor` | watch-only wallet open positions | verified |
 
-Note: `/v2/trades` query params are NOT verified — new code uses
-`/v2/activity?type=TRADE` instead. A non-proxy-wallet `user` returns an empty
-`data` array; treat as "no activity", not an error.
+Note: `/v2/trades` query params were **live-verified 2026-10-01**
+(`condition` + `limit`; see below). A non-proxy-wallet `user` on `/v2/activity`
+returns an empty `data` array; treat as "no activity", not an error.
 
-### `/v2/trades` — RFC-003 predictor tape (Part B live-check, 2026-09-30)
+### `/v2/trades` — RFC-003 predictor tape (live-verified 2026-10-01)
 
 The RFC-003 predictor adopts `/v2/trades?condition=<condition_id>&limit=N`
 (per-trade price/size/side/timestamp are needed for VWAP + momentum), where
@@ -82,19 +92,29 @@ The RFC-003 predictor adopts `/v2/trades?condition=<condition_id>&limit=N`
 formula is pinned by a unit test. `/v2/activity?type=TRADE` stays the
 RFC-001 extension-scan tape and is untouched.
 
-**P0 live-check result: BLOCKED (network).** All three Polymarket hosts
-(`gamma-api`, `clob`, `data-api`) were unreachable from the build network
-(`curl` returned `000` / connection timeout; DNS resolves to a
-non-routable-by-policy address), while `api.github.com`, `httpbin.org`,
-Bluesky, and Reddit answered normally — i.e. a host/geo block, not a
-code problem. Consequences: the exact `/v2/trades` **row key set** and the
-`condition_id -> market` **resolution surface** could not be confirmed live
-and remain `live-check` at runtime. Mitigations are unchanged: defensive
-aliases (`price`, `size`, `side`, `ts ∈ {timestamp, matchTime, match_time}`),
-the `size × price` USD definition pinned by test, and a `resolve_market()`
-seam with the slug path independent of the condition-id path. The first
-runtime run against a reachable network should record the observed key set
-here.
+**Live-check result: VERIFIED (2026-10-01, via the documented read-only fetch
+proxy — direct egress to every Polymarket host still times out on the build
+network; re-run `backend/scripts/live_check.py` without `--proxy` to reproduce
+first-party).** Observed row key set (20 keys):
+
+`proxy_wallet`, `side`, `token_id`, `condition_id`, `size`, `price`,
+`timestamp`, `title`, `slug`, `icon`, `event_slug`, `outcome`,
+`outcome_index`, `name`, `pseudonym`, `bio`, `profile_image`,
+`profile_image_optimized`, `transaction_hash` — **no `usdc_size`**.
+
+Field confirmations, and the bugs the check found:
+
+* `price`/`size` are plain numbers (`0.974`, `100.0`), `side` is `BUY`/`SELL`,
+  and `timestamp` is epoch **seconds** — the defensive aliases hold.
+* **Both outcomes interleave in one feed**: 71 of the last 100 rows for one
+  market were NO-token trades near 0.97 while the YES token traded at 0.029,
+  so the unfiltered vwap read **0.7628 for a 2.85¢ market** and its "buy"
+  flow was really the NO side's. `tape_features` now scopes every row to the
+  YES `token_id` (`outcome_index`/`outcome` accepted as aliases; a row that
+  identifies neither is dropped) — pinned by test.
+* The same live pass found three more shape bugs in the read path
+  (`clobTokenIds` is a JSON-array string; `/book` levels are objects with
+  string numbers served **worst-first**) — see `docs/PLAYTESTING.md` §7.4.
 
 ## hunchfall backend routes — RFC-001 additions (2026-09-30)
 
