@@ -142,3 +142,63 @@ def test_503_exhausts_two_retries_with_the_sleep_capped_at_5s(monkeypatch, tmp_p
         client.get_trades_v2(condition="0xcond", limit=5)
     assert sleeps == [5.0, 5.0]
     assert len(client._http.calls) == 3  # first attempt + two retries, no more
+
+
+# ------------------------------------------- /v2/oi + /v2/holders (RFC-003)
+def test_oi_unwraps_the_envelope_and_returns_the_value(tmp_path):
+    """Live-checked shape: ``{"data": [{"condition_id", "value"}]}``."""
+    client = _client(tmp_path)
+    client._http = FakeHttp(
+        [
+            FakeResponse(
+                200,
+                {
+                    "data": [
+                        {"condition_id": "0xcond", "value": 117919.344026}
+                    ]
+                },
+            )
+        ]
+    )
+    assert client.get_oi("0xcond") == 117919.344026
+    path, params = client._http.calls[0]
+    assert path == "/v2/oi"
+    assert params == {"condition": "0xcond"}
+    assert "offset" not in params
+
+
+def test_oi_empty_or_unparseable_is_none_never_zero(tmp_path):
+    """No row, or a junk value, is reported missing — not 0 (never guessed)."""
+    client = _client(tmp_path)
+    client._http = FakeHttp([FakeResponse(200, {"data": []})])
+    assert client.get_oi("0xcond") is None
+    client._http = FakeHttp([FakeResponse(200, {"data": [{"value": "junk"}]})])
+    assert client.get_oi("0xcond") is None
+
+
+def test_holders_returns_the_outcome_groups_unchanged(tmp_path):
+    """Live-checked shape: one group per outcome token, holders ranked."""
+    payload = {
+        "data": [
+            {
+                "token_id": "111",
+                "holders": [
+                    {"amount": 39999.98, "outcome_index": 0, "name": "whale"}
+                ],
+            }
+        ],
+        "pagination": {"limit": 100, "has_more": False},
+    }
+    client = _client(tmp_path)
+    client._http = FakeHttp([FakeResponse(200, payload)])
+    groups = client.get_holders("0xcond")
+    assert groups == payload["data"]
+    path, params = client._http.calls[0]
+    assert path == "/v2/holders"
+    assert params == {"condition": "0xcond"}
+
+
+def test_holders_empty_data_is_zero_state(tmp_path):
+    client = _client(tmp_path)
+    client._http = FakeHttp([FakeResponse(200, {"data": [], "pagination": {}})])
+    assert client.get_holders("0xcond") == []

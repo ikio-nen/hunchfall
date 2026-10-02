@@ -41,7 +41,7 @@ from app.paths import (
 )
 from app.policy.gate import RiskGate, Signal
 from app.polymarket.clob import ClobClient, book_levels
-from app.polymarket.data_api import DataApiClient
+from app.polymarket.data_api import DataApiClient, top10_holder_share
 from app.polymarket.gamma import GammaClient, negrisk_sum, parse_token_ids
 from app.scraper import Story
 from app.scraper.filter import dedupe_by_url, filter_by_engagement
@@ -386,6 +386,13 @@ def _snapshot(
       timestamp (audited for transparency; the gate vets news-vs-price skew,
       not trade staleness). The tape is informational: a failure degrades to
       an empty timestamp, never to a failed snapshot.
+    * ``oi`` (USD open interest) and ``holders`` (top-10 holder share — the
+      exact definition lives in ``data_api.top10_holder_share``) are the same
+      **features** ``/predict`` builds: unavailable -> ``None`` + the name in
+      ``missing``, never fatal and never guessed,
+    * ``missing`` = feature sources this snapshot could not read (parity with
+      the predictor's ``snapshot.missing``; the tape keeps its own empty-
+      timestamp degradation and is not listed).
 
     Args:
         clob: CLOB market-data client.
@@ -423,6 +430,29 @@ def _snapshot(
     except Exception as exc:  # noqa: BLE001 - tolerated, recorded
         audit.record("stage_error", {"stage": "clob.snapshot", "error": str(exc)})
         return None
+
+    # OI + holder concentration (Data API v2, live-checked 2026-10-03): the
+    # same features /predict builds, with the same honesty — a failure or an
+    # empty payload is named in ``missing`` and the snapshot (and cycle)
+    # continues.
+    missing: list[str] = []
+    oi: float | None = None
+    try:
+        oi = data_api.get_oi(market_id)
+    except Exception as exc:  # noqa: BLE001 - a feature, never fatal
+        audit.record("stage_error", {"stage": "data-api.oi", "error": str(exc)})
+    if oi is None:
+        missing.append("oi")
+    holders_share: float | None = None
+    try:
+        holders_share = top10_holder_share(data_api.get_holders(market_id))
+    except Exception as exc:  # noqa: BLE001 - a feature, never fatal
+        audit.record(
+            "stage_error", {"stage": "data-api.holders", "error": str(exc)}
+        )
+    if holders_share is None:
+        missing.append("holders")
+
     return {
         "mid_price": mid,
         "spread_cents": spread_cents,
@@ -431,6 +461,9 @@ def _snapshot(
         "book_bids": bids,
         "price_ts": utcnow_iso(),
         "last_trade_ts": last_trade_ts,
+        "oi": oi,
+        "holders": holders_share,
+        "missing": missing,
     }
 
 
