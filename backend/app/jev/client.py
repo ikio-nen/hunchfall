@@ -127,6 +127,13 @@ def build_state_text(state: DecisionState) -> str:
 def _questions(option_order: list[str]) -> dict:
     """Build the three-question payload (option order pre-shuffled).
 
+    The ``/v1/systemone`` dialect is validated strictly by laya-serve
+    (live-checked 2026-10-02): noul criteria are keyed ``true``/``false``
+    and a choice question carries ``criteria`` as a label -> description
+    map. The earlier ``yes``/``no`` keys and ``options``/``rubric`` list
+    were rejected with HTTP 422 ("takes 'criteria' keyed only
+    'true'/'false'").
+
     Args:
         option_order: Shuffled canonical option labels for trade_action.
 
@@ -142,8 +149,8 @@ def _questions(option_order: list[str]) -> dict:
                 "is more likely, ~0.5 when the news says nothing either way."
             ),
             "criteria": {
-                "yes": "The news raises the probability of the YES outcome.",
-                "no": "The news lowers the probability of the YES outcome.",
+                "true": "The news raises the probability of the YES outcome.",
+                "false": "The news lowers the probability of the YES outcome.",
             },
         },
         "trade_action": {
@@ -153,21 +160,17 @@ def _questions(option_order: list[str]) -> dict:
                 "paper trader do? Choose SKIP when the news is ambiguous, "
                 "already priced in, or unrelated to the market."
             ),
-            # <= 255 options allowed; rubrics ride alongside each option.
             # NOTE: order is randomized per call (see JevClient.decide) to
             # defeat Jev's documented option-position sensitivity; the
             # caller normalizes the returned label back to canonical form.
-            "options": [
-                {
-                    "label": label,
-                    "rubric": {
-                        "YES": "News supports YES and the price underreacts.",
-                        "NO": "News undermines YES and the price underreacts.",
-                        "SKIP": "Ambiguous, priced in, or unrelated news.",
-                    }[label],
-                }
+            "criteria": {
+                label: {
+                    "YES": "News supports YES and the price underreacts.",
+                    "NO": "News undermines YES and the price underreacts.",
+                    "SKIP": "Ambiguous, priced in, or unrelated news.",
+                }[label]
                 for label in option_order
-            ],
+            },
         },
         "signal_strength": {
             "type": "score",

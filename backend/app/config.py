@@ -12,15 +12,23 @@ Usage::
 """
 
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/.env — documented in README/`.env.example` and gitignored. Anchored to
+# the module so the file is found no matter the process CWD; real OS env vars
+# still take precedence over it.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
     """All knobs for the data layer and the trading loop."""
 
-    model_config = SettingsConfigDict(env_prefix="", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="", extra="ignore", env_file=_ENV_FILE
+    )
 
     # ---- Polymarket public APIs (read-only market data) ---------------------
     POLYMARKET_GAMMA_URL: str = "https://gamma-api.polymarket.com"
